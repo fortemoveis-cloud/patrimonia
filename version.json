@@ -1,6 +1,6 @@
 {
-  "version": "1.0.0",
-  "releaseDate": "2026-06-02",
-  "notes": "Versão inicial do PatrimonIA",
+  "version": "1.0.1",
+  "releaseDate": "2026-06-05",
+  "notes": "Atualização de chaves de API e correções",
   "downloadUrl": "https://github.com/fortemoveis-cloud/patrimonia/releases/latest"
 }
