@@ -1,0 +1,13 @@
+﻿<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- bg -->
+  <rect width="32" height="32" rx="7" fill="#0F1547"/>
+  <!-- circle -->
+  <circle cx="16" cy="16" r="11" fill="#1E2D8A"/>
+  <!-- ascending chart line -->
+  <polyline points="8,22 12,16 17,19 22,11"
+            stroke="#A78BFA" stroke-width="2.2"
+            stroke-linecap="round" stroke-linejoin="round"
+            fill="none"/>
+  <!-- end dot -->
+  <circle cx="22" cy="11" r="2.5" fill="#7C3AED"/>
+</svg>
