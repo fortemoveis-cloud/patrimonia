@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import func
+from sqlalchemy import func, distinct
 from datetime import date, timedelta
+from typing import Optional
 
-from database import get_db
+from database import get_db, _get_app_setting
 from models import Snapshot, Asset, Institution, Property, PropertyValuation
 
 router = APIRouter(prefix="/alerts", tags=["alerts"])
@@ -12,7 +13,8 @@ router = APIRouter(prefix="/alerts", tags=["alerts"])
 @router.get("/maturity")
 def get_maturity_alerts(db: Session = Depends(get_db)):
     today  = date.today()
-    cutoff = today + timedelta(days=90)
+    days_window = int(_get_app_setting(db, "alert_maturity_days", "90"))
+    cutoff = today + timedelta(days=days_window)
 
     # Latest snapshot per asset that has a maturity_date in the window
     subq = (
@@ -48,7 +50,7 @@ def get_maturity_alerts(db: Session = Depends(get_db)):
 
         if days <= 30:
             severity = "critical"; critical += 1
-        elif days <= 60:
+        elif days <= min(60, days_window):
             severity = "warning"; warning += 1
         else:
             severity = "info"; info += 1
@@ -143,3 +145,89 @@ def get_property_alerts(db: Session = Depends(get_db)):
                         })
 
     return {"count": len(items), "items": items}
+
+
+@router.get("/drops")
+def get_drop_alerts(
+    threshold_pct: Optional[float] = Query(None),
+    asset_types:   Optional[str]   = Query(None),
+    db: Session = Depends(get_db),
+):
+    threshold = threshold_pct if threshold_pct is not None else float(_get_app_setting(db, "alert_drop_threshold_pct", "10"))
+    monitored_raw = asset_types if asset_types is not None else _get_app_setting(db, "alert_monitored_classes", "equity,fixed_income,fund,cash")
+    monitored = set(c.strip() for c in monitored_raw.split(",") if c.strip())
+
+    # Two most recent distinct snapshot dates across all assets
+    dates_desc = [
+        r[0]
+        for r in db.query(distinct(Snapshot.snapshot_date))
+        .order_by(Snapshot.snapshot_date.desc())
+        .limit(2)
+        .all()
+    ]
+    if len(dates_desc) < 2:
+        return {"count": 0, "items": [], "date_before": None, "date_after": None}
+
+    date_after, date_before = dates_desc[0], dates_desc[1]
+
+    def _load_snaps(d):
+        return {
+            s.asset_id: s
+            for s in (
+                db.query(Snapshot)
+                .options(joinedload(Snapshot.asset).joinedload(Asset.institution))
+                .filter(Snapshot.snapshot_date == d)
+                .all()
+            )
+        }
+
+    snaps_after  = _load_snaps(date_after)
+    snaps_before = _load_snaps(date_before)
+    common_ids   = set(snaps_after.keys()) & set(snaps_before.keys())
+
+    def _eff(s):
+        if s.asset and s.asset.currency == "BRL" and s.tax_net is not None:
+            return s.tax_net
+        return s.market_value or 0.0
+
+    items = []
+    for asset_id in common_ids:
+        s_after  = snaps_after[asset_id]
+        s_before = snaps_before[asset_id]
+        asset    = s_after.asset
+        if not asset or asset.asset_type not in monitored:
+            continue
+
+        mv_before = _eff(s_before)
+        mv_after  = _eff(s_after)
+        if mv_before <= 0:
+            continue
+
+        drop_pct = (mv_before - mv_after) / mv_before * 100
+
+        # Asymmetric fixed-income anomaly: any drop > 0.5% is suspicious
+        fi_anomaly = asset.asset_type == "fixed_income" and drop_pct > 0.5
+
+        if drop_pct >= threshold or fi_anomaly:
+            items.append({
+                "asset_id":        asset_id,
+                "asset_name":      asset.name,
+                "institution_name": asset.institution.name if asset.institution else "—",
+                "asset_type":      asset.asset_type,
+                "currency":        asset.currency,
+                "value_before":    round(mv_before, 2),
+                "value_after":     round(mv_after, 2),
+                "drop_pct":        round(drop_pct, 2),
+                "date_before":     date_before.isoformat(),
+                "date_after":      date_after.isoformat(),
+                "anomaly_type":    "fixed_income_drop" if fi_anomaly and drop_pct < threshold else None,
+            })
+
+    items.sort(key=lambda x: -x["drop_pct"])
+    return {
+        "count":       len(items),
+        "date_before": date_before.isoformat(),
+        "date_after":  date_after.isoformat(),
+        "threshold_pct": threshold,
+        "items":       items,
+    }

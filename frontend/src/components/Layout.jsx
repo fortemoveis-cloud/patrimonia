@@ -2,7 +2,7 @@ import { NavLink, useNavigate, useLocation } from "react-router-dom";
 import { useEffect, useState } from "react";
 import {
   LayoutDashboard, Upload, Briefcase, TrendingUp, DollarSign,
-  CreditCard, Home, Bell, Menu, X, Download, HardDrive, Activity, Bot,
+  CreditCard, Home, Bell, Menu, X, Download, HardDrive, Activity, Bot, PenLine, Settings2, FileText,
 } from "lucide-react";
 import { getMaturityAlerts, getImportStats, createBackup, listBackups, downloadSqlite, downloadJson } from "../api/client";
 import FloatingChat from "./FloatingChat";
@@ -12,11 +12,14 @@ const NAV = [
   { to: "/upload",     label: "Importar",    icon: Upload },
   { to: "/portfolio",  label: "Carteira",    icon: Briefcase },
   { to: "/history",    label: "Histórico",   icon: TrendingUp },
+  { to: "/reports",    label: "Relatórios",  icon: FileText },
   { to: "/properties", label: "Imóveis",     icon: Home },
   { to: "/loans",      label: "Empréstimos", icon: CreditCard },
   { to: "/exchange",   label: "Câmbio",      icon: DollarSign },
-  { to: "/logs",       label: "Logs",        icon: Activity },
-  { to: "/chat",       label: "Assistente",  icon: Bot },
+  { to: "/manual-assets", label: "Manuais",       icon: PenLine },
+  { to: "/settings",      label: "Configurações", icon: Settings2 },
+  { to: "/logs",          label: "Logs",          icon: Activity },
+  { to: "/chat",          label: "Assistente",    icon: Bot },
 ];
 
 // ── PatrimonIA brand colors ───────────────────────────────────────────────────

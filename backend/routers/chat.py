@@ -1,11 +1,7 @@
 import os
 from collections import defaultdict
 from datetime import date, timedelta
-from pathlib import Path
 from typing import List
-
-from dotenv import load_dotenv
-load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env", encoding="utf-8-sig")
 
 import anthropic
 from fastapi import APIRouter, Depends, HTTPException

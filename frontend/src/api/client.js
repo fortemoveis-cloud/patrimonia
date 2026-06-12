@@ -61,6 +61,8 @@ export const uploadPropertyPhoto = (id, file) => {
   return api.post(`/properties/${id}/photos`, form, { headers: { "Content-Type": "multipart/form-data" } });
 };
 export const deletePropertyPhoto = (id, photoId) => api.delete(`/properties/${id}/photos/${photoId}`);
+export const exportPropertiesXlsx = () =>
+  api.get("/properties/export/xlsx", { responseType: "blob" });
 export const getPriceRefs = () => api.get("/properties/price-refs");
 export const upsertPriceRef = (payload) => api.post("/properties/price-refs", payload);
 export const deletePriceRef = (id) => api.delete(`/properties/price-refs/${id}`);
@@ -89,6 +91,29 @@ export const getChatUsage = () => api.get("/chat/usage");
 
 export const getImportLogs  = (limit = 50) => api.get("/logs/imports", { params: { limit } });
 export const getImportStats = () => api.get("/logs/imports/stats");
+
+export const getManualAssets       = ()           => api.get("/manual-assets/");
+export const createManualAsset     = (payload)    => api.post("/manual-assets/", payload);
+export const updateManualAssetValue = (id, payload) => api.post(`/manual-assets/${id}/update-value`, payload);
+export const getManualAssetHistory  = (id)        => api.get(`/manual-assets/${id}/history`);
+export const archiveManualAsset     = (id)        => api.delete(`/manual-assets/${id}`);
+
+export const getImportSources    = ()              => api.get("/settings/sources");
+export const updateImportSource  = (id, payload)  => api.patch(`/settings/sources/${id}`, payload);
+export const reorderImportSources = (orderedIds)  => api.post("/settings/sources/reorder", { ordered_ids: orderedIds });
+
+export const getAppSettings      = ()             => api.get("/settings/app");
+export const updateAppSetting    = (key, value)   => api.put(`/settings/app/${key}`, { value });
+
+export const getDropAlerts       = (params)       => api.get("/alerts/drops", { params });
+
+export const getReportList       = ()             => api.get("/reports/list");
+export const generateReports     = (payload)      => api.post("/reports/generate", payload);
+export const getReport           = (id)           => api.get(`/reports/${id}`);
+export const downloadReportPdf   = (id, assetTypes) => {
+  const qs = assetTypes ? `?asset_types=${encodeURIComponent(assetTypes)}` : "";
+  window.open(`http://localhost:8000/reports/${id}/pdf${qs}`, "_blank");
+};
 
 export const downloadSqlite = () => window.open("http://localhost:8000/backup/sqlite", "_blank");
 export const downloadJson   = () => window.open("http://localhost:8000/backup/json",   "_blank");

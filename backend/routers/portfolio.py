@@ -9,7 +9,7 @@ from collections import defaultdict
 import httpx
 
 from database import get_db
-from models import Snapshot, Asset, Institution, ExchangeRate, Dividend
+from models import Snapshot, Asset, Institution, ExchangeRate, Dividend, ImportSource
 from schemas import SnapshotOut, PortfolioSummary, PortfolioHistory, DividendCreate
 
 AWESOME_URL = "https://economia.awesomeapi.com.br/json/daily/USD-BRL/{days}"
@@ -87,22 +87,77 @@ def get_summary(
             latest_date=None,
         )
 
-    target_date = snapshot_date or available_dates[0]
-    rate = _get_rate(db, target_date)
+    # Load import_sources for label resolution: {(institution_id, account_number): src}
+    all_sources = db.query(ImportSource).all()
+    src_map = {(s.institution_id, s.account_number): s for s in all_sources}
+    src_order = {(s.institution_id, s.account_number): s.display_order for s in all_sources}
 
-    snaps = (
-        db.query(Snapshot)
-        .options(joinedload(Snapshot.asset).joinedload(Asset.institution))
-        .filter(Snapshot.snapshot_date == target_date)
-        .all()
-    )
+    def _src_label(inst_id: int, acct: str) -> Optional[str]:
+        src = src_map.get((inst_id, acct))
+        if src:
+            return src.custom_label or src.default_label
+        return None
+
+    def _src_visible(inst_id: int, acct: str) -> bool:
+        src = src_map.get((inst_id, acct))
+        return src.visible if src else True
+
+    # ── Carry-forward mode: latest snapshot per source (institution + account) ─
+    source_dates: dict = {}  # (institution_id, acct_norm) → max snapshot_date
+    overall_max = None
+
+    if snapshot_date is None:
+        source_max_sq = (
+            db.query(
+                Asset.institution_id,
+                func.coalesce(Asset.account_number, "").label("account_number"),
+                func.max(Snapshot.snapshot_date).label("max_snap_date"),
+            )
+            .join(Snapshot, Snapshot.asset_id == Asset.id)
+            .group_by(Asset.institution_id, func.coalesce(Asset.account_number, ""))
+            .subquery()
+        )
+        snaps = (
+            db.query(Snapshot)
+            .options(joinedload(Snapshot.asset).joinedload(Asset.institution))
+            .join(Asset, Asset.id == Snapshot.asset_id)
+            .join(
+                source_max_sq,
+                (Asset.institution_id == source_max_sq.c.institution_id)
+                & (func.coalesce(Asset.account_number, "") == source_max_sq.c.account_number)
+                & (Snapshot.snapshot_date == source_max_sq.c.max_snap_date),
+            )
+            .all()
+        )
+        pdf_max_dates = []  # max dates from pdf_import sources only (for staleness comparison)
+        for s in snaps:
+            if s.asset:
+                key = (s.asset.institution_id, s.asset.account_number or "")
+                if key not in source_dates or s.snapshot_date > source_dates[key]:
+                    source_dates[key] = s.snapshot_date
+                if s.asset.source != "manual":
+                    pdf_max_dates.append(s.snapshot_date)
+        # overall_max computed from pdf_import sources only so that manual
+        # asset updates don't make all import sources appear stale
+        overall_max = max(pdf_max_dates) if pdf_max_dates else (max(source_dates.values()) if source_dates else None)
+        target_date = overall_max or available_dates[0]
+    else:
+        target_date = snapshot_date
+        snaps = (
+            db.query(Snapshot)
+            .options(joinedload(Snapshot.asset).joinedload(Asset.institution))
+            .filter(Snapshot.snapshot_date == target_date)
+            .all()
+        )
+
+    rate = _get_rate(db, target_date)
 
     total_mv_usd = 0.0
     total_mv_brl = 0.0
     total_cb_usd = 0.0
     total_cb_brl = 0.0
     total_ug_usd = 0.0
-    by_inst: dict = defaultdict(lambda: {"market_value_usd": 0.0, "market_value_brl": 0.0})
+    by_inst: dict = {}  # label → {market_value_usd, market_value_brl, _order, snapshot_date, stale}
     by_type: dict = defaultdict(lambda: {"market_value_usd": 0.0, "market_value_brl": 0.0})
     by_currency: dict = defaultdict(lambda: {
         "market_value_usd": 0.0, "market_value_brl": 0.0,
@@ -127,9 +182,30 @@ def get_summary(
         total_cb_brl += cb_brl
         total_ug_usd += ug_usd
 
-        inst_name = s.asset.institution.name if s.asset and s.asset.institution else "Unknown"
-        by_inst[inst_name]["market_value_usd"] += mv_usd
-        by_inst[inst_name]["market_value_brl"] += mv_brl
+        if s.asset and s.asset.institution:
+            inst_id = s.asset.institution_id
+            acct = s.asset.account_number or ""
+            label = _src_label(inst_id, acct) or s.asset.institution.name
+            visible = _src_visible(inst_id, acct)
+            order = src_order.get((inst_id, acct), 999)
+            src_date = source_dates.get((inst_id, acct))
+            is_manual = getattr(s.asset, "source", None) == "manual"
+            src_stale = bool(not is_manual and src_date and overall_max and src_date < overall_max)
+        else:
+            label = "Unknown"
+            visible = True
+            order = 999
+            src_date = None
+            src_stale = False
+
+        if visible:
+            if label not in by_inst:
+                by_inst[label] = {
+                    "market_value_usd": 0.0, "market_value_brl": 0.0,
+                    "_order": order, "snapshot_date": src_date, "stale": src_stale,
+                }
+            by_inst[label]["market_value_usd"] += mv_usd
+            by_inst[label]["market_value_brl"] += mv_brl
 
         atype = s.asset.asset_type if s.asset else "other"
         by_type[atype]["market_value_usd"] += mv_usd
@@ -140,17 +216,31 @@ def get_summary(
         by_currency[currency]["cost_basis_usd"]   += cb_usd
         by_currency[currency]["cost_basis_brl"]   += cb_brl
 
+    sorted_inst = sorted(by_inst.items(), key=lambda x: x[1]["_order"])
+    by_inst_out = [
+        {
+            "name":             k,
+            "market_value_usd": v["market_value_usd"],
+            "market_value_brl": v["market_value_brl"],
+            "snapshot_date":    v["snapshot_date"].isoformat() if v["snapshot_date"] else None,
+            "stale":            v["stale"],
+        }
+        for k, v in sorted_inst
+    ]
+    stale_sources = any(v["stale"] for v in by_inst.values())
+
     return PortfolioSummary(
         total_market_value_usd=round(total_mv_usd, 2),
         total_market_value_brl=round(total_mv_brl, 2),
         total_cost_basis_usd=round(total_cb_usd, 2),
         total_cost_basis_brl=round(total_cb_brl, 2),
         total_unrealized_gain_usd=round(total_ug_usd, 2),
-        by_institution=[{"name": k, **v} for k, v in by_inst.items()],
+        by_institution=by_inst_out,
         by_asset_type=[{"type": k, **v} for k, v in by_type.items()],
         by_currency=[{"currency": k, **v} for k, v in by_currency.items()],
         snapshot_dates=available_dates,
         latest_date=available_dates[0] if available_dates else None,
+        stale_sources=stale_sources,
     )
 
 
@@ -234,6 +324,12 @@ def get_history(
         .all()
     )
 
+    # Load import_sources once for label resolution in history series
+    _hist_src_map: dict = {}
+    if group_by == "institution":
+        _hist_src_map = {(x.institution_id, x.account_number): x
+                         for x in db.query(ImportSource).all()}
+
     dates_set = set(dates)
     usd_by_date: dict = {d: 0.0 for d in dates}
     brl_by_date: dict = {d: 0.0 for d in dates}
@@ -258,7 +354,11 @@ def get_history(
 
         if group_by:
             if group_by == "institution":
-                key = s.asset.institution.name if s.asset and s.asset.institution else "Unknown"
+                if s.asset and s.asset.institution:
+                    src = _hist_src_map.get((s.asset.institution_id, s.asset.account_number or ""))
+                    key = (src.custom_label or src.default_label) if src else s.asset.institution.name
+                else:
+                    key = "Unknown"
             elif group_by == "asset_type":
                 key = s.asset.asset_type if s.asset else "other"
             else:

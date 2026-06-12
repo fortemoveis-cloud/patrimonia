@@ -5,10 +5,10 @@ from sqlalchemy.orm import Session
 from datetime import date
 from typing import List, Tuple
 
-from database import get_db
-from models import Institution, Asset, Snapshot, ImportLog
+from database import get_db, _slugify, _make_default_label
+from models import Institution, Asset, Snapshot, ImportLog, ImportSource
 from schemas import UploadResult
-from parsers.registry import detect_and_parse
+from parsers.registry import detect_and_parse, get_supported_parsers
 from parsers.base import ParsedRecord
 
 router = APIRouter(prefix="/upload", tags=["upload"])
@@ -23,11 +23,13 @@ def _upsert_institution(db: Session, name: str, country: str, currency: str) -> 
     return inst
 
 
-def _upsert_asset(db: Session, inst: Institution, rec: ParsedRecord) -> Asset:
+def _upsert_asset(db: Session, inst: Institution, rec: ParsedRecord, is_reimport: bool = False) -> Asset:
     asset = db.query(Asset).filter(
         Asset.institution_id == inst.id,
         Asset.name == rec.asset_name,
         Asset.asset_type == rec.asset_type,
+        Asset.account_number == getattr(rec, "account_number", None),
+        Asset.source != "manual",
     ).first()
     if not asset:
         asset = Asset(
@@ -37,6 +39,8 @@ def _upsert_asset(db: Session, inst: Institution, rec: ParsedRecord) -> Asset:
             asset_type=rec.asset_type,
             currency=rec.asset_currency,
             purchase_date=rec.purchase_date,
+            source="pdf_import",
+            account_number=getattr(rec, "account_number", None),
         )
         db.add(asset)
         db.flush()
@@ -45,12 +49,42 @@ def _upsert_asset(db: Session, inst: Institution, rec: ParsedRecord) -> Asset:
         if rec.purchase_date is not None and not asset.user_edited:
             if asset.purchase_date is None or rec.purchase_date < asset.purchase_date:
                 asset.purchase_date = rec.purchase_date
+        if not asset.user_edited and not asset.account_number:
+            asset.account_number = getattr(rec, "account_number", None)
     # Never overwrite user-edited notes/monthly_dividends_expected
     return asset
 
 
-def _upsert_snapshot(db: Session, asset_id: int, filename: str, rec: ParsedRecord) -> Tuple[bool, bool]:
+def _upsert_import_source(db: Session, inst: Institution, account_number: str) -> ImportSource:
+    acct = account_number or ""
+    src = db.query(ImportSource).filter(
+        ImportSource.institution_id == inst.id,
+        ImportSource.account_number == acct,
+    ).first()
+    if not src:
+        label = _make_default_label(inst.name, acct)
+        order = db.query(ImportSource).count()
+        src = ImportSource(
+            institution_id=inst.id,
+            account_number=acct,
+            institution_key=_slugify(inst.name),
+            default_label=label,
+            currency=inst.currency or "BRL",
+            display_order=order,
+            visible=True,
+        )
+        db.add(src)
+        db.flush()
+    return src
+
+
+def _upsert_snapshot(db: Session, asset_id: int, filename: str, rec: ParsedRecord, is_reimport: bool = False) -> Tuple[bool, bool]:
     """Insert or update snapshot. Returns (inserted, updated)."""
+    if is_reimport:
+        asset = db.query(Asset).filter(Asset.id == asset_id).first()
+        if asset and getattr(asset, "source", None) == "manual":
+            return False, False
+
     existing = db.query(Snapshot).filter(
         Snapshot.asset_id == asset_id,
         Snapshot.snapshot_date == rec.snapshot_date,
@@ -117,13 +151,14 @@ async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db
         parser_name, records = detect_and_parse(filename, content)
 
         if parser_name is None or not records:
-            log.error_message = f"Nenhum parser encontrou correspondência para '{filename}'. Formatos aceitos: Regions XLSX/PDF, XP XLSX, Inter PDF."
+            supported = ", ".join(get_supported_parsers())
+            log.error_message = f"Nenhum parser encontrou correspondência para '{filename}'. Parsers registrados: {supported}."
             log.processing_time_ms = int((time.time() - start_ms) * 1000)
             db.add(log)
             db.commit()
             raise HTTPException(
                 status_code=422,
-                detail=f"No parser could handle '{filename}'. Supported: Regions XLSX/PDF, XP XLSX, Inter PDF.",
+                detail=f"No parser could handle '{filename}'. Supported: {supported}.",
             )
 
         log.parser_name = parser_name
@@ -139,8 +174,9 @@ async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db
         for rec in records:
             try:
                 inst = _upsert_institution(db, rec.institution_name, rec.institution_country, rec.institution_currency)
-                asset = _upsert_asset(db, inst, rec)
-                was_inserted, was_updated = _upsert_snapshot(db, asset.id, filename, rec)
+                asset = _upsert_asset(db, inst, rec, is_reimport=True)
+                _upsert_import_source(db, inst, getattr(rec, "account_number", None) or "")
+                was_inserted, was_updated = _upsert_snapshot(db, asset.id, filename, rec, is_reimport=True)
                 if was_inserted:
                     inserted += 1
                 elif was_updated:

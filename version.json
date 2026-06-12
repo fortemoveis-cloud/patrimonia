@@ -1,6 +1,6 @@
 {
-  "version": "1.0.1",
-  "releaseDate": "2026-06-05",
-  "notes": "Atualização de chaves de API e correções",
+  "version": "1.0.2",
+  "releaseDate": "2026-06-11",
+  "notes": "Relatórios semanais/mensais, alertas de queda, configurações de alerta",
   "downloadUrl": "https://github.com/fortemoveis-cloud/patrimonia/releases/latest"
 }

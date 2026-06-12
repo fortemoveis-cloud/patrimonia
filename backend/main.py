@@ -1,5 +1,6 @@
 import logging
 import os
+import threading
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -20,7 +21,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from database import init_db
-from routers import upload, portfolio, exchange, loans, properties, alerts, reports, backup, logs, chat
+from routers import upload, portfolio, exchange, loans, properties, alerts, reports, backup, logs, chat, manual_assets, settings
 
 app = FastAPI(title="PatrimonIA", version="1.0.0")
 
@@ -47,6 +48,8 @@ app.include_router(reports.router)
 app.include_router(backup.router)
 app.include_router(logs.router)
 app.include_router(chat.router)
+app.include_router(manual_assets.router)
+app.include_router(settings.router)
 
 # ── Static file mounts ─────────────────────────────────────────────────────────
 config.UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
@@ -63,11 +66,16 @@ if config.FRONTEND_DIR:
 @app.on_event("startup")
 def startup():
     init_db()
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if api_key and api_key != "sua_chave_aqui":
-        print(f"[PatrimonIA] ANTHROPIC_API_KEY carregada ({len(api_key)} chars).")
-    else:
-        print("[PatrimonIA] AVISO: ANTHROPIC_API_KEY não configurada — chat com IA desabilitado.")
+    from routers.reports import _backfill_reports
+    threading.Thread(target=_backfill_reports, daemon=True, name="report-backfill").start()
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    rentcast = os.environ.get("RENTCAST_API_KEY", "").strip()
+    rapidapi = os.environ.get("RAPIDAPI_KEY", "").strip()
+    def _key_status(val: str) -> str:
+        return f"OK ({len(val)} chars)" if val and val != "sua_chave_aqui" else "NAO ENCONTRADA"
+    print(f"[PatrimonIA] ANTHROPIC_API_KEY : {_key_status(api_key)}")
+    print(f"[PatrimonIA] RENTCAST_API_KEY  : {_key_status(rentcast)}")
+    print(f"[PatrimonIA] RAPIDAPI_KEY      : {_key_status(rapidapi)}")
 
 
 @app.get("/health")

@@ -30,6 +30,7 @@ class ParsedRecord:
     purchase_date: Optional[date] = None
     portfolio_name: Optional[str] = None
     raw_source_file: Optional[str] = None
+    account_number: Optional[str] = None
 
 
 class BaseParser(ABC):

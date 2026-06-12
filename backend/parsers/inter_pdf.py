@@ -38,7 +38,14 @@ class InterPdfParser(BaseParser):
                 for page in pdf.pages[:2]:
                     text = page.extract_text() or ""
                     text_up = text.upper()
-                    if "EXTRATO DE POSIÇÃO DE RENDA FIXA" in text_up:
+                    is_rf = ("EXTRATO DE POSIÇÃO DE RENDA FIXA" in text_up or
+                             ("EXTRATO DE POSI" in text_up and "RENDA FIXA" in text_up))
+                    if is_rf:
+                        # Reject PJ format: has "Nota" as first cell of a column-header row
+                        for tbl in page.extract_tables():
+                            for row in (tbl or [])[:5]:
+                                if row and str(row[0] or "").strip() == "Nota":
+                                    return False
                         return True
                     if "inter.co" in text.lower() and ("RENDA FIXA" in text_up or "EXTRATO" in text_up):
                         return True

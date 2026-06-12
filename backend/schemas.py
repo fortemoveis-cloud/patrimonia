@@ -93,6 +93,7 @@ class PortfolioSummary(BaseModel):
     by_currency: List[dict]
     snapshot_dates: List[date]
     latest_date: Optional[date] = None
+    stale_sources: bool = False
 
 
 class PortfolioHistory(BaseModel):
@@ -182,6 +183,24 @@ class PriceReferenceCreate(BaseModel):
     bairro: Optional[str] = None
     preco_m2: float
     source: str = "manual"
+
+
+class ManualAssetCreate(BaseModel):
+    name: str
+    asset_type: str = "other"
+    currency: str = "BRL"
+    notes: Optional[str] = None
+    institution_name: Optional[str] = None
+    quantity: Optional[float] = None
+    current_value: float
+    owner: Optional[str] = None
+
+
+class ManualAssetHistoryOut(BaseModel):
+    date: date
+    value: float
+
+    model_config = {"from_attributes": True}
 
 
 class DividendCreate(BaseModel):

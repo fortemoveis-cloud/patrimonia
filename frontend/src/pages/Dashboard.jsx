@@ -38,10 +38,7 @@ export default function Dashboard() {
   const [loading, setLoading]           = useState(true);
 
   useEffect(() => {
-    getDates().then((r) => {
-      setDates(r.data);
-      if (r.data.length) setSelected(r.data[0]);
-    });
+    getDates().then((r) => { setDates(r.data); });
     getLoanSummary().then((r) => setLoanSummary(r.data)).catch(() => {});
     getPropertySummary().then((r) => setPropSummary(r.data)).catch(() => {});
     getMaturityAlerts().then((r) => setAlerts(r.data)).catch(() => {});
@@ -51,7 +48,6 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
-    if (!selected && dates.length === 0) { setLoading(false); return; }
     setLoading(true);
     getSummary(selected)
       .then((r) => setSummary(r.data))
@@ -154,7 +150,12 @@ export default function Dashboard() {
         </div>
         <div className="flex items-center gap-2">
           {dates.length > 0 && (
-            <select value={selected || ""} onChange={(e) => setSelected(e.target.value)} className="input-base">
+            <select
+              value={selected || ""}
+              onChange={(e) => setSelected(e.target.value || null)}
+              className="input-base"
+            >
+              <option value="">Atual</option>
               {dates.map((d) => <option key={d} value={d}>{d}</option>)}
             </select>
           )}
@@ -194,6 +195,19 @@ export default function Dashboard() {
               ? `${alerts.critical} título(s) vencendo em até 30 dias!`
               : `${alerts.warning} título(s) vencendo em 31–60 dias.`}
             {" "}<span className="underline">Ver alertas →</span>
+          </p>
+        </div>
+      )}
+
+      {/* Stale-data banner */}
+      {summary?.stale_sources && !selected && (
+        <div
+          className="rounded-xl px-4 py-3 flex items-center gap-3"
+          style={{ background: "#fff7ed", border: "1px solid #fed7aa" }}
+        >
+          <AlertTriangle size={18} style={{ color: "#c2410c", flexShrink: 0 }} />
+          <p className="text-sm font-medium text-orange-700">
+            Parte dos dados está desatualizada — algumas instituições exibem a última posição conhecida (marcadas em vermelho abaixo).
           </p>
         </div>
       )}
@@ -333,7 +347,22 @@ export default function Dashboard() {
       {/* Charts */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <DonutChart data={byTypeData} nameKey="name" valueKey="value" title="Alocação por Tipo de Ativo" />
-        <DonutChart data={byInstData} nameKey="name" valueKey="value" title="Alocação por Instituição" />
+        <div>
+          <DonutChart data={byInstData} nameKey="name" valueKey="value" title="Alocação por Instituição" />
+          {!selected && summary.by_institution.some((d) => d.stale) && (
+            <div className="mt-2 space-y-1 px-1">
+              {summary.by_institution.filter((d) => d.stale).map((d, i) => {
+                const [, m, day] = (d.snapshot_date || "").split("-");
+                return (
+                  <div key={i} className="flex items-center gap-2 text-xs" style={{ color: "#dc2626" }}>
+                    <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: "#dc2626" }} />
+                    <span><strong>{d.name}</strong> — posição de {day}/{m}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </div>
 
       {distData.length > 1 && (

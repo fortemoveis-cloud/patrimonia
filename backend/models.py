@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, Date, Boolean, ForeignKey, DateTime
+from sqlalchemy import Column, Integer, String, Float, Date, Boolean, ForeignKey, DateTime, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from database import Base
@@ -11,8 +11,9 @@ class Institution(Base):
     name = Column(String, unique=True, nullable=False)
     country = Column(String, default="US")
     currency = Column(String, default="USD")
-    assets = relationship("Asset", back_populates="institution")
-    loans  = relationship("Loan", back_populates="institution")
+    assets         = relationship("Asset", back_populates="institution")
+    loans          = relationship("Loan", back_populates="institution")
+    import_sources = relationship("ImportSource", back_populates="institution")
 
 
 class Asset(Base):
@@ -30,10 +31,14 @@ class Asset(Base):
     monthly_dividends_expected = Column(Float)
     user_edited = Column(Boolean, default=False)
     purchase_date = Column(Date)                 # earliest application date (for vs CDI)
+    source = Column(String, default="pdf_import")  # pdf_import | manual
+    account_number = Column(String, nullable=True)
 
     institution = relationship("Institution", back_populates="assets")
     snapshots = relationship("Snapshot", back_populates="asset")
     dividends = relationship("Dividend", back_populates="asset", order_by="Dividend.payment_date.desc()")
+    manual_history = relationship("ManualAssetHistory", back_populates="asset",
+                                  order_by="ManualAssetHistory.date.desc()", cascade="all, delete-orphan")
 
 
 class Snapshot(Base):
@@ -216,6 +221,38 @@ class ChatUsage(Base):
     message_count = Column(Integer, default=0)
 
 
+class ManualAssetHistory(Base):
+    __tablename__ = "manual_asset_history"
+
+    id         = Column(Integer, primary_key=True, index=True)
+    asset_id   = Column(Integer, ForeignKey("assets.id"), nullable=False)
+    date       = Column(Date, nullable=False, index=True)
+    value      = Column(Float, nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+    asset = relationship("Asset", back_populates="manual_history")
+
+    __table_args__ = (UniqueConstraint("asset_id", "date", name="uq_manual_history_asset_date"),)
+
+
+class ImportSource(Base):
+    __tablename__ = "import_sources"
+
+    id              = Column(Integer, primary_key=True, index=True)
+    institution_id  = Column(Integer, ForeignKey("institutions.id"), nullable=False)
+    account_number  = Column(String, nullable=False, default="")  # "" = no specific account
+    institution_key = Column(String, nullable=False)              # stable slug
+    default_label   = Column(String, nullable=False)
+    custom_label    = Column(String, nullable=True)
+    currency        = Column(String, nullable=False, default="BRL")
+    display_order   = Column(Integer, nullable=False, default=0)
+    visible         = Column(Boolean, nullable=False, default=True)
+
+    institution = relationship("Institution", back_populates="import_sources")
+
+    __table_args__ = (UniqueConstraint("institution_id", "account_number", name="uq_import_source"),)
+
+
 class ImportLog(Base):
     __tablename__ = "import_logs"
 
@@ -233,3 +270,25 @@ class ImportLog(Base):
     file_size_kb       = Column(Float)
     processing_time_ms = Column(Integer)
     created_at         = Column(DateTime, server_default=func.now())
+
+
+class AppSettings(Base):
+    __tablename__ = "app_settings"
+
+    id         = Column(Integer, primary_key=True, index=True)
+    key        = Column(String, nullable=False, unique=True)
+    value      = Column(String, nullable=True)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class Report(Base):
+    __tablename__ = "reports"
+
+    id           = Column(Integer, primary_key=True, index=True)
+    type         = Column(String, nullable=False)
+    period_start = Column(Date, nullable=False)
+    period_end   = Column(Date, nullable=False)
+    generated_at = Column(DateTime, server_default=func.now())
+    payload      = Column(String, nullable=False)
+
+    __table_args__ = (UniqueConstraint("type", "period_start", name="uq_report_type_period"),)

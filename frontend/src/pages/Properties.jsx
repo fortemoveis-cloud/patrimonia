@@ -5,11 +5,13 @@ import {
   uploadPropertyPhoto, deletePropertyPhoto,
   getPriceRefs, upsertPriceRef, deletePriceRef,
   getPropertyAlerts, updateZillowEstimate, saveZillowManual,
+  exportPropertiesXlsx,
 } from "../api/client";
 import {
   Home, Plus, X, TrendingUp, Clock, Trash2, Camera, MapPin,
   ChevronDown, ChevronUp, AlertTriangle, RefreshCw, Building2,
   DollarSign, Percent, BarChart2, Globe, Flag, ExternalLink,
+  LayoutGrid, List, FileDown,
 } from "lucide-react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid,
@@ -767,6 +769,143 @@ function PriceRefPanel() {
   );
 }
 
+// ── Property List View ────────────────────────────────────────────────────────
+
+function PropertyListRow({ prop, onEdit, onUpdateVal, onHistory, onArchive, onZillow }) {
+  const [zillowLoading, setZillowLoading] = useState(false);
+  const isUSA  = prop.country === "Estados Unidos";
+  const gainOk = (prop.gain_brl ?? 0) >= 0;
+
+  const handleZillow = async () => {
+    setZillowLoading(true);
+    try { await onZillow(prop.id); } catch {} finally { setZillowLoading(false); }
+  };
+
+  return (
+    <tr className="border-b border-gray-50 hover:bg-gray-50 transition-colors">
+      {/* Imóvel */}
+      <td className="px-4 py-3">
+        <div className="flex items-center gap-2">
+          {isUSA && <span className="text-sm flex-shrink-0">🇺🇸</span>}
+          <div>
+            <p className="font-semibold text-gray-800 text-sm leading-tight">{prop.description}</p>
+            {(prop.address || prop.cidade) && (
+              <p className="text-xs text-gray-400 flex items-center gap-1 mt-0.5">
+                <MapPin size={9} />
+                {prop.address || [prop.bairro, prop.cidade].filter(Boolean).join(", ")}
+              </p>
+            )}
+          </div>
+        </div>
+      </td>
+      {/* Tipo */}
+      <td className="px-4 py-3">
+        <TypeBadge type={prop.property_type} />
+      </td>
+      {/* Valor atual */}
+      <td className="px-4 py-3 text-right">
+        {isUSA ? (
+          <>
+            <p className="font-bold text-sm" style={{ color: "#1d4ed8" }}>{fmtUSD(prop.current_value_usd)}</p>
+            <p className="text-xs text-gray-400">{fmtBRL(prop.current_value_brl)}</p>
+          </>
+        ) : (
+          <p className="font-bold text-sm" style={{ color: "#9333ea" }}>{fmtBRL(prop.current_value_brl)}</p>
+        )}
+      </td>
+      {/* Fonte */}
+      <td className="px-4 py-3 text-center">
+        <div className="flex flex-col items-center gap-1">
+          <ValuationBadge source={prop.valuation_source} />
+          {prop.stale_valuation && (
+            <AlertTriangle size={11} className="text-amber-500" title="Valor desatualizado (>6 meses)" />
+          )}
+        </div>
+      </td>
+      {/* Última avaliação */}
+      <td className="px-4 py-3 text-center text-xs text-gray-500">
+        {fmtDate(prop.last_valuation_date)}
+      </td>
+      {/* Variação */}
+      <td className="px-4 py-3 text-right">
+        <p className="text-sm font-semibold" style={{ color: gainOk ? "#16a34a" : "#dc2626" }}>
+          {prop.gain_pct != null ? `${prop.gain_pct >= 0 ? "+" : ""}${prop.gain_pct.toFixed(1)}%` : "—"}
+        </p>
+        <p className="text-xs text-gray-400">
+          {prop.gain_brl != null ? `${gainOk ? "+" : ""}${fmtBRL(prop.gain_brl)}` : "—"}
+        </p>
+      </td>
+      {/* Ações */}
+      <td className="px-4 py-3">
+        <div className="flex items-center gap-1 justify-end flex-nowrap">
+          <button onClick={() => onEdit(prop)}
+            className="text-xs px-2 py-1 rounded hover:bg-purple-50 transition-colors font-medium"
+            style={{ color: "#9333ea" }}>
+            Editar
+          </button>
+          <button onClick={() => onUpdateVal(prop)}
+            className="text-xs px-2 py-1 rounded hover:bg-blue-50 text-blue-600 transition-colors flex items-center gap-0.5">
+            <TrendingUp size={11} /> Valor
+          </button>
+          <button onClick={() => onHistory(prop)}
+            className="p-1.5 rounded hover:bg-gray-100 text-gray-500 transition-colors">
+            <Clock size={12} />
+          </button>
+          {isUSA && (
+            <button onClick={handleZillow} disabled={zillowLoading}
+              className="p-1.5 rounded transition-colors flex items-center disabled:opacity-50"
+              style={{ background: "#dcfce7", color: "#15803d" }}
+              title="Atualizar via Rentcast">
+              {zillowLoading
+                ? <span className="w-3 h-3 border border-green-600 border-t-transparent rounded-full animate-spin" />
+                : <Globe size={12} />}
+            </button>
+          )}
+          <button onClick={() => onArchive(prop.id)}
+            className="p-1.5 rounded hover:bg-red-50 text-red-400 transition-colors">
+            <Trash2 size={12} />
+          </button>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+function PropertyListView({ properties, onEdit, onUpdateVal, onHistory, onArchive, onZillow }) {
+  return (
+    <div className="bg-white rounded-2xl border border-gray-100 overflow-hidden">
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-gray-100" style={{ background: "#f9fafb" }}>
+              <th className="text-left px-4 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wide">Imóvel</th>
+              <th className="text-left px-4 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wide">Tipo</th>
+              <th className="text-right px-4 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wide">Valor Atual</th>
+              <th className="text-center px-4 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wide">Fonte</th>
+              <th className="text-center px-4 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wide">Últ. Avaliação</th>
+              <th className="text-right px-4 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wide">Variação</th>
+              <th className="px-4 py-3" />
+            </tr>
+          </thead>
+          <tbody>
+            {properties.map((prop) => (
+              <PropertyListRow
+                key={prop.id}
+                prop={prop}
+                onEdit={onEdit}
+                onUpdateVal={onUpdateVal}
+                onHistory={onHistory}
+                onArchive={onArchive}
+                onZillow={onZillow}
+              />
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function Properties() {
@@ -779,6 +918,8 @@ export default function Properties() {
   const [valInput,    setValInput]    = useState({ value: "", notes: "" });
   const [histModal,   setHistModal]   = useState(null);
   const [saving,      setSaving]      = useState(false);
+  const [viewMode,    setViewMode]    = useState(() => localStorage.getItem("properties_view_mode") || "cards");
+  const [exporting,   setExporting]   = useState(false);
 
   const refresh = () => {
     setLoading(true);
@@ -848,6 +989,42 @@ export default function Properties() {
     refresh();
   };
 
+  const handleToggleView = (mode) => {
+    setViewMode(mode);
+    localStorage.setItem("properties_view_mode", mode);
+  };
+
+  const handleExportXlsx = async () => {
+    setExporting(true);
+    try {
+      const res = await exportPropertiesXlsx();
+      const blob = res.data;
+      const today = new Date().toISOString().slice(0, 10);
+      const filename = `imoveis_${today}.xlsx`;
+
+      if (window.electronAPI?.saveXlsx) {
+        const arrayBuffer = await blob.arrayBuffer();
+        const bytes = new Uint8Array(arrayBuffer);
+        let binary = "";
+        bytes.forEach((b) => { binary += String.fromCharCode(b); });
+        await window.electronAPI.saveXlsx(btoa(binary), filename);
+      } else {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
+    } catch (err) {
+      console.error("Erro ao exportar imóveis:", err);
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const properties  = summary?.properties ?? [];
   const staleCount  = propAlerts.filter((a) => a.type === "stale_valuation").length;
   const belowCdiCount = propAlerts.filter((a) => a.type === "below_cdi").length;
@@ -870,6 +1047,35 @@ export default function Properties() {
           <p className="text-gray-400 text-sm">Patrimônio imobiliário</p>
         </div>
         <div className="flex items-center gap-2">
+          {/* Cards / Lista toggle */}
+          <div className="flex items-center border border-gray-200 rounded-lg overflow-hidden">
+            <button
+              onClick={() => handleToggleView("cards")}
+              className={`p-2 transition-colors ${viewMode === "cards" ? "bg-purple-100 text-purple-700" : "text-gray-400 hover:text-gray-600"}`}
+              title="Cards"
+            >
+              <LayoutGrid size={15} />
+            </button>
+            <button
+              onClick={() => handleToggleView("list")}
+              className={`p-2 transition-colors ${viewMode === "list" ? "bg-purple-100 text-purple-700" : "text-gray-400 hover:text-gray-600"}`}
+              title="Lista"
+            >
+              <List size={15} />
+            </button>
+          </div>
+          {/* Export */}
+          <button
+            onClick={handleExportXlsx}
+            disabled={exporting || properties.length === 0}
+            className="btn-secondary text-xs py-2 px-3 flex items-center gap-1.5 disabled:opacity-40"
+            title="Exportar para Excel"
+          >
+            {exporting
+              ? <span className="w-3 h-3 border border-gray-400 border-t-transparent rounded-full animate-spin" />
+              : <FileDown size={13} />}
+            {exporting ? "…" : "Excel"}
+          </button>
           <button onClick={refresh} className="btn-secondary text-xs py-2 px-3 flex items-center gap-1.5">
             <RefreshCw size={12} className={loading ? "animate-spin" : ""} />
           </button>
@@ -990,7 +1196,7 @@ export default function Properties() {
       {/* Price reference panel */}
       <PriceRefPanel />
 
-      {/* Property cards grid */}
+      {/* Property list / cards */}
       {loading ? (
         <div className="flex justify-center py-16">
           <div className="w-7 h-7 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
@@ -1004,6 +1210,21 @@ export default function Properties() {
           <p className="text-gray-500 font-medium">Nenhum imóvel cadastrado.</p>
           <p className="text-gray-400 text-sm mt-1">Clique em "Novo Imóvel" para começar.</p>
         </div>
+      ) : viewMode === "list" ? (
+        <PropertyListView
+          properties={properties}
+          onEdit={(p) => { setEditingProp(p); setShowForm(true); }}
+          onUpdateVal={(p) => {
+            setValModal(p);
+            const initVal = p.currency === "USD"
+              ? String(p.current_value_usd ?? "")
+              : String(p.current_value_brl ?? "");
+            setValInput({ value: initVal, notes: "" });
+          }}
+          onHistory={handleHistory}
+          onArchive={handleArchive}
+          onZillow={handleZillow}
+        />
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-5">
           {properties.map((prop) => (

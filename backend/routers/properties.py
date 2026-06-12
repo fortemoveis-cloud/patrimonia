@@ -1,3 +1,4 @@
+import io
 import logging
 import os
 import re
@@ -10,6 +11,9 @@ logger = logging.getLogger(__name__)
 
 import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
+import openpyxl
+from openpyxl.styles import Alignment, Font, PatternFill
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -648,6 +652,104 @@ def delete_photo(property_id: int, photo_id: int, db: Session = Depends(get_db))
     db.delete(photo)
     db.commit()
     return {"ok": True}
+
+
+# ── Excel export ──────────────────────────────────────────────────────────────
+
+@router.get("/export/xlsx")
+async def export_properties_xlsx(db: Session = Depends(get_db)):
+    """Export all active properties to an .xlsx file with live USD/BRL rate from AwesomeAPI."""
+    usd_brl = _latest_rate(db)
+    rate_source = "banco de dados"
+    try:
+        async with httpx.AsyncClient(timeout=4.0) as c:
+            r = await c.get("https://economia.awesomeapi.com.br/last/USD-BRL")
+            if r.status_code == 200:
+                usd_brl = float(r.json()["USDBRL"]["bid"])
+                rate_source = "AwesomeAPI"
+    except Exception:
+        pass
+
+    props = (
+        db.query(Property)
+        .filter(Property.is_active == True)  # noqa: E712
+        .order_by(Property.description)
+        .all()
+    )
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Imóveis"
+
+    HEADERS = [
+        "Descrição", "Endereço", "Tipo", "País",
+        "Valor Atual (USD)", "Valor Atual (R$)",
+        "Cotação USD/BRL", "Data Última Avaliação", "Fonte Avaliação",
+        "Valor de Compra (BRL)", "Valor de Compra (USD)",
+        "Variação (%)", "Variação (R$)",
+    ]
+
+    header_fill = PatternFill(start_color="4A148C", end_color="4A148C", fill_type="solid")
+    header_font = Font(color="FFFFFF", bold=True, size=10)
+
+    for col, h in enumerate(HEADERS, 1):
+        cell = ws.cell(row=1, column=col, value=h)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center")
+
+    for prop in props:
+        current_brl = _current_value(db, prop.id, prop.purchase_price_brl or 0.0)
+        latest_val  = _latest_valuation(db, prop.id)
+        current_usd = latest_val.current_value_usd if latest_val else None
+        last_date   = latest_val.valuation_date.isoformat() if (latest_val and latest_val.valuation_date) else None
+        source      = (latest_val.valuation_source or "manual") if latest_val else "manual"
+
+        if current_usd is None:
+            current_usd = round(current_brl / usd_brl, 2) if usd_brl else None
+
+        purchase_brl = prop.purchase_price_brl
+        purchase_usd = prop.purchase_price_usd
+        gain_brl = round(current_brl - purchase_brl, 2) if purchase_brl is not None else None
+        gain_pct = (
+            round(gain_brl / purchase_brl * 100, 2)
+            if (gain_brl is not None and purchase_brl and purchase_brl > 0)
+            else None
+        )
+
+        ws.append([
+            prop.description,
+            prop.address or "",
+            prop.property_type,
+            prop.country or "Brasil",
+            round(current_usd, 2) if current_usd else None,
+            round(current_brl, 2),
+            round(usd_brl, 4),
+            last_date,
+            source,
+            purchase_brl,
+            purchase_usd,
+            gain_pct,
+            gain_brl,
+        ])
+
+    ws.append([])
+    ws.append([f"Cotação USD/BRL: {round(usd_brl, 4)} — fonte: {rate_source} em {date.today().isoformat()}"])
+
+    col_widths = [28, 38, 14, 16, 18, 18, 15, 22, 18, 22, 22, 14, 14]
+    for i, w in enumerate(col_widths, 1):
+        ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    today_str = date.today().isoformat()
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="imoveis_{today_str}.xlsx"'},
+    )
 
 
 # ── Price references (FipeZAP alternative) ─────────────────────────────────────

@@ -14,4 +14,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // App info
   getVersion:   ()         => ipcRenderer.invoke('get-version'),
   openExternal: (url)      => ipcRenderer.invoke('open-external', url),
+
+  // File save dialog
+  saveXlsx: (base64, filename) => ipcRenderer.invoke('save-xlsx', base64, filename),
+
+  // Update event listeners (push events from main → renderer)
+  onUpdateAvailable:  (cb) => ipcRenderer.on('update-available',  (_e, info) => cb(info)),
+  onUpdateDownloaded: (cb) => ipcRenderer.on('update-downloaded', (_e, info) => cb(info)),
+  onDownloadProgress: (cb) => ipcRenderer.on('download-progress', (_e, pct)  => cb(pct)),
+  removeUpdateListeners: () => {
+    ipcRenderer.removeAllListeners('update-available');
+    ipcRenderer.removeAllListeners('update-downloaded');
+    ipcRenderer.removeAllListeners('download-progress');
+  },
+
+  isElectron: true,
 });

@@ -61,12 +61,27 @@ function readServerEnv() {
 }
 
 // ── Backend process management ────────────────────────────────────────────────
-function startBackend() {
+
+// Kill any process already occupying port 8000 (orphaned backends from prior sessions)
+function killPortProcess() {
+  return new Promise(resolve => {
+    const { exec } = require('child_process');
+    exec(
+      'for /f "tokens=5" %a in (\'netstat -ano ^| findstr :8000.*LISTENING\') do taskkill /F /PID %a',
+      { shell: 'cmd.exe' },
+      () => resolve()  // ignore errors — port may simply be free
+    );
+  });
+}
+
+async function startBackend() {
   if (!fs.existsSync(BACKEND_EXE)) {
     console.warn(`[electron] Backend não encontrado: ${BACKEND_EXE}`);
     console.warn('[electron] Em modo dev, inicie o backend manualmente: cd backend && uvicorn main:app --port 8000');
     return;
   }
+
+  await killPortProcess();
 
   const env = {
     ...process.env,
@@ -190,6 +205,21 @@ ipcMain.handle('open-external', (_event, url) => {
   }
 });
 
+ipcMain.handle('save-xlsx', async (_event, base64data, filename) => {
+  if (!mainWindow) return { saved: false };
+  const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+    defaultPath: filename,
+    filters: [{ name: 'Planilha Excel', extensions: ['xlsx'] }],
+  });
+  if (canceled || !filePath) return { saved: false };
+  try {
+    fs.writeFileSync(filePath, Buffer.from(base64data, 'base64'));
+    return { saved: true, filePath };
+  } catch (e) {
+    return { saved: false, error: e.message };
+  }
+});
+
 // ── Auto-updater ──────────────────────────────────────────────────────────────
 function setupAutoUpdater() {
   autoUpdater.autoDownload         = true;
@@ -203,14 +233,22 @@ function setupAutoUpdater() {
 
   autoUpdater.on('update-available', info => {
     console.log(`[updater] Nova versão disponível: ${info.version}`);
+    if (mainWindow) mainWindow.webContents.send('update-available', { version: info.version });
   });
 
   autoUpdater.on('download-progress', ({ percent }) => {
-    if (mainWindow) mainWindow.setProgressBar(percent / 100);
+    if (mainWindow) {
+      mainWindow.setProgressBar(percent / 100);
+      mainWindow.webContents.send('download-progress', Math.round(percent));
+    }
   });
 
   autoUpdater.on('update-downloaded', info => {
-    if (mainWindow) mainWindow.setProgressBar(-1);
+    if (mainWindow) {
+      mainWindow.setProgressBar(-1);
+      mainWindow.webContents.send('update-downloaded', { version: info.version });
+    }
+    // Fallback dialog (renderer may not be loaded yet in edge cases)
     if (!mainWindow) return;
     dialog.showMessageBox(mainWindow, {
       type:      'info',
@@ -244,7 +282,7 @@ app.whenReady().then(async () => {
   win.once('ready-to-show', () => win.show());
 
   // Start backend (skip if dev mode and exe doesn't exist)
-  startBackend();
+  await startBackend();
 
   // Wait for backend (up to 60s)
   const backendReady = await waitForBackend(60);
@@ -254,9 +292,9 @@ app.whenReady().then(async () => {
       'PatrimonIA — Erro de inicialização',
       'O servidor interno não respondeu em 60 segundos.\n\n' +
       'Causas comuns:\n' +
-      '  • Porta 8000 já em uso por outro programa\n' +
-      '  • Antivírus bloqueando o executável\n\n' +
-      'Feche outros aplicativos que usem a porta 8000 e tente novamente.'
+      '  • Antivírus bloqueando o executável\n' +
+      '  • Porta 8000 em uso por outro programa após falha no encerramento\n\n' +
+      'Tente reiniciar o computador e abrir o PatrimonIA novamente.'
     );
     app.quit();
     return;
@@ -272,7 +310,11 @@ app.whenReady().then(async () => {
 
   // Check for updates 10 s after launch — only in packaged builds
   if (IS_PACKAGED) {
-    setTimeout(() => autoUpdater.checkForUpdates().catch(() => {}), 10000);
+    setTimeout(() => {
+      autoUpdater.checkForUpdates().catch(err => {
+        console.error('[updater] Falha ao verificar atualizações:', err.message);
+      });
+    }, 10000);
   }
 });
 
