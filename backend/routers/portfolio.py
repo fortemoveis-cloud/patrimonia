@@ -678,17 +678,47 @@ def get_risk_analysis(
     snapshot_date: Optional[date] = Query(None),
     db: Session = Depends(get_db),
 ):
-    target = snapshot_date or db.query(func.max(Snapshot.snapshot_date)).scalar()
-    if not target:
+    if snapshot_date is None:
+        # Carry-forward: latest snapshot per source (institution + account), same logic as get_summary.
+        # Avoids the global max-date trap where a newer manual-asset snapshot can hide all imported ones.
+        source_max_sq = (
+            db.query(
+                Asset.institution_id,
+                func.coalesce(Asset.account_number, "").label("account_number"),
+                func.max(Snapshot.snapshot_date).label("max_snap_date"),
+            )
+            .join(Snapshot, Snapshot.asset_id == Asset.id)
+            .group_by(Asset.institution_id, func.coalesce(Asset.account_number, ""))
+            .subquery()
+        )
+        snaps = (
+            db.query(Snapshot)
+            .options(joinedload(Snapshot.asset).joinedload(Asset.institution))
+            .join(Asset, Asset.id == Snapshot.asset_id)
+            .join(
+                source_max_sq,
+                (Asset.institution_id == source_max_sq.c.institution_id)
+                & (func.coalesce(Asset.account_number, "") == source_max_sq.c.account_number)
+                & (Snapshot.snapshot_date == source_max_sq.c.max_snap_date),
+            )
+            .all()
+        )
+        # Exchange rate: use max date from non-manual sources (same as get_summary)
+        pdf_dates = [s.snapshot_date for s in snaps if s.asset and s.asset.source != "manual"]
+        target = max(pdf_dates) if pdf_dates else date.today()
+    else:
+        target = snapshot_date
+        snaps = (
+            db.query(Snapshot)
+            .options(joinedload(Snapshot.asset).joinedload(Asset.institution))
+            .filter(Snapshot.snapshot_date == target)
+            .all()
+        )
+
+    if not snaps:
         return {"total_usd": 0, "alerts": [], "by_institution": [], "by_type": [], "by_currency": [], "top_positions": []}
 
     rate = _get_rate(db, target)
-    snaps = (
-        db.query(Snapshot)
-        .options(joinedload(Snapshot.asset).joinedload(Asset.institution))
-        .filter(Snapshot.snapshot_date == target)
-        .all()
-    )
 
     total_usd = 0.0
     by_inst: dict = defaultdict(float)

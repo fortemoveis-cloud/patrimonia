@@ -6,12 +6,13 @@ import {
   getPriceRefs, upsertPriceRef, deletePriceRef,
   getPropertyAlerts, updateZillowEstimate, saveZillowManual,
   exportPropertiesXlsx,
+  getRentalIncome, upsertRentalIncome, deleteRentalIncome,
 } from "../api/client";
 import {
   Home, Plus, X, TrendingUp, Clock, Trash2, Camera, MapPin,
   ChevronDown, ChevronUp, AlertTriangle, RefreshCw, Building2,
   DollarSign, Percent, BarChart2, Globe, Flag, ExternalLink,
-  LayoutGrid, List, FileDown,
+  LayoutGrid, List, FileDown, Banknote,
 } from "lucide-react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid,
@@ -169,7 +170,7 @@ function HistoryChart({ valuations, currency }) {
 
 // ── Property Card ─────────────────────────────────────────────────────────────
 
-function PropertyCard({ prop, onEdit, onUpdateVal, onHistory, onArchive, onPhoto, onZillow, onZillowManual }) {
+function PropertyCard({ prop, onEdit, onUpdateVal, onHistory, onArchive, onPhoto, onZillow, onZillowManual, onRental }) {
   const [zillowLoading, setZillowLoading] = useState(false);
   const [zillowError,   setZillowError]   = useState(null);
   const [showManual,    setShowManual]    = useState(false);
@@ -400,6 +401,21 @@ function PropertyCard({ prop, onEdit, onUpdateVal, onHistory, onArchive, onPhoto
             <MetricChip label="Aluguel/mês" value={`R$${fmt0(prop.aluguel_mensal)}`}
               color="#059669" bg="#ecfdf5" />
           )}
+          {prop.rental_months_recorded > 0 && prop.rental_last_12m > 0 && (
+            <MetricChip label="Renda 12m"
+              value={prop.currency === "USD" ? fmtUSD(prop.rental_last_12m) : fmtBRL(prop.rental_last_12m)}
+              color="#059669" bg="#ecfdf5" title="Renda de locação recebida nos últimos 12 meses" />
+          )}
+          {prop.rental_yield_on_purchase_pct != null && (
+            <MetricChip label="Yield compra"
+              value={`${prop.rental_yield_on_purchase_pct.toFixed(1)}% a.a.`}
+              color="#0369a1" bg="#eff6ff" title="Renda 12m / Preço de compra × 100" />
+          )}
+          {prop.rental_yield_on_current_pct != null && (
+            <MetricChip label="Yield locação"
+              value={`${prop.rental_yield_on_current_pct.toFixed(1)}% a.a.`}
+              color="#7c3aed" bg="#faf5ff" title="Renda 12m / Valor atual × 100" />
+          )}
         </div>
 
         <div className="flex-1" />
@@ -418,6 +434,12 @@ function PropertyCard({ prop, onEdit, onUpdateVal, onHistory, onArchive, onPhoto
           <button onClick={() => onHistory(prop)}
             className="text-xs font-medium px-2.5 py-1.5 rounded-lg hover:bg-gray-100 transition-colors flex items-center gap-1 text-gray-500">
             <Clock size={12} /> Histórico
+          </button>
+          <button onClick={() => onRental(prop)}
+            className="text-xs font-medium px-2.5 py-1.5 rounded-lg hover:bg-emerald-50 transition-colors flex items-center gap-1"
+            style={{ color: "#059669" }}
+            title="Lançar renda de locação">
+            <Banknote size={12} /> Renda
           </button>
           {isUSA && (
             <button
@@ -660,6 +682,197 @@ function PropertyFormModal({ editingProp, onClose, onSaved }) {
   );
 }
 
+// ── Rental Income Panel ───────────────────────────────────────────────────────
+
+const MONTHS_PT = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
+
+function RentalIncomePanel({ propertyId, currency, purchasePrice, currentValue }) {
+  const isUSD = currency === "USD";
+  const fmt   = (v) => isUSD ? fmtUSD(v) : fmtBRL(v);
+  const currentYear = new Date().getFullYear();
+
+  const [records,    setRecords]    = useState([]);
+  const [loading,    setLoading]    = useState(true);
+  const [activeYear, setActiveYear] = useState(currentYear);
+  const [cellValues, setCellValues] = useState({});
+  const [saving,     setSaving]     = useState({});
+
+  useEffect(() => {
+    setLoading(true);
+    getRentalIncome(propertyId)
+      .then((r) => {
+        const data = r.data;
+        setRecords(data);
+        const map = {};
+        data.forEach((rec) => { map[`${rec.year}-${rec.month}`] = String(rec.amount); });
+        setCellValues(map);
+      })
+      .finally(() => setLoading(false));
+  }, [propertyId]);
+
+  const years = (() => {
+    const minY = records.length > 0 ? Math.min(...records.map((r) => r.year)) : currentYear;
+    const ys = [];
+    for (let y = Math.min(minY, currentYear - 1); y <= currentYear + 1; y++) ys.push(y);
+    return ys;
+  })();
+
+  const handleBlur = async (year, month) => {
+    const key      = `${year}-${month}`;
+    const val      = (cellValues[key] ?? "").trim();
+    const existing = records.find((r) => r.year === year && r.month === month);
+
+    if (val === "") {
+      if (existing) {
+        setSaving((s) => ({ ...s, [key]: true }));
+        try {
+          await deleteRentalIncome(propertyId, year, month);
+          setRecords((prev) => prev.filter((r) => !(r.year === year && r.month === month)));
+          setCellValues((prev) => { const n = { ...prev }; delete n[key]; return n; });
+        } finally { setSaving((s) => ({ ...s, [key]: false })); }
+      }
+      return;
+    }
+
+    const amount = parseFloat(val);
+    if (isNaN(amount) || amount < 0) {
+      setCellValues((prev) => ({ ...prev, [key]: existing ? String(existing.amount) : "" }));
+      return;
+    }
+    if (existing && Math.abs(existing.amount - amount) < 0.001) return;
+
+    setSaving((s) => ({ ...s, [key]: true }));
+    try {
+      const r = await upsertRentalIncome(propertyId, { year, month, amount, currency: currency || "BRL", notes: null });
+      const saved = r.data;
+      setRecords((prev) => [...prev.filter((r) => !(r.year === year && r.month === month)), saved]);
+      setCellValues((prev) => ({ ...prev, [key]: String(saved.amount) }));
+    } finally { setSaving((s) => ({ ...s, [key]: false })); }
+  };
+
+  // Summary calculations
+  const totalAll    = records.reduce((s, r) => s + r.amount, 0);
+  const monthsCount = records.length;
+  const avgMonthly  = monthsCount > 0 ? totalAll / monthsCount : 0;
+  const today       = new Date();
+  const last12m     = records
+    .filter((r) => { const ago = (today.getFullYear() - r.year) * 12 + (today.getMonth() + 1 - r.month); return ago >= 0 && ago < 12; })
+    .reduce((s, r) => s + r.amount, 0);
+  const yearTotal   = records.filter((r) => r.year === activeYear).reduce((s, r) => s + r.amount, 0);
+
+  return (
+    <div className="space-y-4">
+      {/* Year tabs */}
+      <div className="flex gap-1 flex-wrap border-b border-gray-100 pb-3">
+        {years.map((y) => (
+          <button key={y} onClick={() => setActiveYear(y)}
+            className={`px-3 py-1 rounded-lg text-sm font-medium transition-colors ${
+              activeYear === y ? "text-white" : "text-gray-500 hover:bg-gray-100"
+            }`}
+            style={activeYear === y ? { background: "#9333ea" } : {}}>
+            {y}
+          </button>
+        ))}
+      </div>
+
+      {/* Month grid */}
+      {loading ? (
+        <div className="flex justify-center py-8">
+          <div className="w-5 h-5 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-gray-100">
+                <th className="text-left pb-2 text-xs text-gray-400 font-semibold uppercase tracking-wide w-16">Mês</th>
+                <th className="text-right pb-2 text-xs text-gray-400 font-semibold uppercase tracking-wide pr-2">
+                  Valor líquido recebido ({isUSD ? "USD" : "R$"})
+                </th>
+                <th className="w-5" />
+              </tr>
+            </thead>
+            <tbody>
+              {MONTHS_PT.map((m, i) => {
+                const month      = i + 1;
+                const key        = `${activeYear}-${month}`;
+                const isSaving   = saving[key];
+                const val        = cellValues[key] ?? "";
+                const hasRecord  = records.some((r) => r.year === activeYear && r.month === month);
+
+                return (
+                  <tr key={month} className={`border-b border-gray-50 transition-colors ${hasRecord ? "bg-emerald-50/40" : "hover:bg-gray-50/60"}`}>
+                    <td className="py-1.5 pr-3 text-gray-600 font-medium text-sm">{m}</td>
+                    <td className="py-1.5 text-right pr-2">
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        value={val}
+                        onChange={(e) => setCellValues((prev) => ({ ...prev, [key]: e.target.value }))}
+                        onBlur={() => handleBlur(activeYear, month)}
+                        placeholder="—"
+                        className="text-right border border-transparent rounded px-2 py-0.5 w-36 text-sm font-mono hover:border-gray-200 focus:border-purple-400 focus:outline-none transition-colors bg-transparent"
+                        style={hasRecord ? { color: "#059669", fontWeight: 600 } : { color: "#9ca3af" }}
+                      />
+                    </td>
+                    <td className="py-1.5 pl-1 w-5">
+                      {isSaving && (
+                        <span className="w-3 h-3 border border-purple-400 border-t-transparent rounded-full animate-spin inline-block" />
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+            <tfoot>
+              <tr className="border-t-2 border-gray-200">
+                <td className="pt-2 text-xs text-gray-400 font-semibold uppercase">Total {activeYear}</td>
+                <td className="pt-2 text-right font-bold text-sm pr-2" style={{ color: "#9333ea" }}>
+                  {yearTotal > 0 ? fmt(yearTotal) : "—"}
+                </td>
+                <td />
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      )}
+
+      {/* Summary section */}
+      {!loading && monthsCount > 0 && (
+        <div className="border-t border-gray-100 pt-3 space-y-2">
+          <p className="text-xs text-gray-400 font-semibold uppercase tracking-wide">Resumo geral</p>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+            <MetricChip label="Total recebido" value={fmt(totalAll)} color="#059669" bg="#ecfdf5"
+              title="Soma de toda a renda registrada" />
+            <MetricChip label="Média/mês" value={fmt(avgMonthly)} color="#059669" bg="#ecfdf5"
+              title={`Baseado em ${monthsCount} meses registrados`} />
+            {last12m > 0 && (
+              <MetricChip label="Renda 12m" value={fmt(last12m)} color="#0369a1" bg="#eff6ff"
+                title="Soma dos últimos 12 meses" />
+            )}
+            {purchasePrice > 0 && last12m > 0 && (
+              <MetricChip label="Yield s/ compra" value={`${(last12m / purchasePrice * 100).toFixed(1)}% a.a.`}
+                color="#0369a1" bg="#eff6ff" title="Renda 12m / Preço de compra × 100" />
+            )}
+            {currentValue > 0 && last12m > 0 && (
+              <MetricChip label="Yield s/ valor" value={`${(last12m / currentValue * 100).toFixed(1)}% a.a.`}
+                color="#7c3aed" bg="#faf5ff" title="Renda 12m / Valor atual × 100" />
+            )}
+            <MetricChip label="Meses lançados" value={`${monthsCount}`} color="#6b7280" bg="#f9fafb" />
+          </div>
+        </div>
+      )}
+
+      {!loading && monthsCount === 0 && (
+        <p className="text-center text-gray-400 text-sm py-4">
+          Nenhum lançamento registrado. Digite um valor em qualquer mês e pressione Tab ou clique fora para salvar.
+        </p>
+      )}
+    </div>
+  );
+}
+
 // ── Price Reference Panel ─────────────────────────────────────────────────────
 
 function PriceRefPanel() {
@@ -771,7 +984,7 @@ function PriceRefPanel() {
 
 // ── Property List View ────────────────────────────────────────────────────────
 
-function PropertyListRow({ prop, onEdit, onUpdateVal, onHistory, onArchive, onZillow }) {
+function PropertyListRow({ prop, onEdit, onUpdateVal, onHistory, onArchive, onZillow, onRental }) {
   const [zillowLoading, setZillowLoading] = useState(false);
   const isUSA  = prop.country === "Estados Unidos";
   const gainOk = (prop.gain_brl ?? 0) >= 0;
@@ -851,6 +1064,12 @@ function PropertyListRow({ prop, onEdit, onUpdateVal, onHistory, onArchive, onZi
             className="p-1.5 rounded hover:bg-gray-100 text-gray-500 transition-colors">
             <Clock size={12} />
           </button>
+          <button onClick={() => onRental(prop)}
+            className="p-1.5 rounded hover:bg-emerald-50 transition-colors"
+            style={{ color: "#059669" }}
+            title="Renda de locação">
+            <Banknote size={12} />
+          </button>
           {isUSA && (
             <button onClick={handleZillow} disabled={zillowLoading}
               className="p-1.5 rounded transition-colors flex items-center disabled:opacity-50"
@@ -871,7 +1090,7 @@ function PropertyListRow({ prop, onEdit, onUpdateVal, onHistory, onArchive, onZi
   );
 }
 
-function PropertyListView({ properties, onEdit, onUpdateVal, onHistory, onArchive, onZillow }) {
+function PropertyListView({ properties, onEdit, onUpdateVal, onHistory, onArchive, onZillow, onRental }) {
   return (
     <div className="bg-white rounded-2xl border border-gray-100 overflow-hidden">
       <div className="overflow-x-auto">
@@ -897,6 +1116,7 @@ function PropertyListView({ properties, onEdit, onUpdateVal, onHistory, onArchiv
                 onHistory={onHistory}
                 onArchive={onArchive}
                 onZillow={onZillow}
+                onRental={onRental}
               />
             ))}
           </tbody>
@@ -920,6 +1140,7 @@ export default function Properties() {
   const [saving,      setSaving]      = useState(false);
   const [viewMode,    setViewMode]    = useState(() => localStorage.getItem("properties_view_mode") || "cards");
   const [exporting,   setExporting]   = useState(false);
+  const [rentalModal, setRentalModal] = useState(null);
 
   const refresh = () => {
     setLoading(true);
@@ -988,6 +1209,8 @@ export default function Properties() {
     await saveZillowManual(propId, valueUsd);
     refresh();
   };
+
+  const handleRental = (prop) => setRentalModal(prop);
 
   const handleToggleView = (mode) => {
     setViewMode(mode);
@@ -1224,6 +1447,7 @@ export default function Properties() {
           onHistory={handleHistory}
           onArchive={handleArchive}
           onZillow={handleZillow}
+          onRental={handleRental}
         />
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-5">
@@ -1244,6 +1468,7 @@ export default function Properties() {
               onPhoto={handlePhoto}
               onZillow={handleZillow}
               onZillowManual={handleZillowManual}
+              onRental={handleRental}
             />
           ))}
         </div>
@@ -1313,6 +1538,26 @@ export default function Properties() {
               </button>
             </div>
           </div>
+        </Modal>
+      )}
+
+      {/* Rental income modal */}
+      {rentalModal && (
+        <Modal title={`Renda de Locação — ${rentalModal.description}`} onClose={() => setRentalModal(null)} wide>
+          <RentalIncomePanel
+            propertyId={rentalModal.id}
+            currency={rentalModal.currency}
+            purchasePrice={
+              rentalModal.currency === "USD"
+                ? rentalModal.purchase_price_usd
+                : rentalModal.purchase_price_brl
+            }
+            currentValue={
+              rentalModal.currency === "USD"
+                ? rentalModal.current_value_usd
+                : rentalModal.current_value_brl
+            }
+          />
         </Modal>
       )}
 

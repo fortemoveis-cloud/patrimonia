@@ -102,6 +102,28 @@ def _run_migrations():
                     conn.execute(text(f"ALTER TABLE property_valuations ADD COLUMN {col} {col_type}"))
             conn.commit()
 
+    if "property_rental_income" not in tables:
+        with engine.connect() as conn:
+            conn.execute(text("""
+                CREATE TABLE property_rental_income (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    property_id INTEGER NOT NULL
+                                REFERENCES properties(id) ON DELETE CASCADE,
+                    year        INTEGER NOT NULL,
+                    month       INTEGER NOT NULL,
+                    amount      REAL    NOT NULL,
+                    currency    TEXT    NOT NULL DEFAULT 'BRL',
+                    notes       TEXT,
+                    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(property_id, year, month)
+                )
+            """))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_pri_property_id "
+                "ON property_rental_income(property_id)"
+            ))
+            conn.commit()
+
     if "app_settings" not in tables:
         with engine.connect() as conn:
             conn.execute(text("""
@@ -215,7 +237,7 @@ def _cleanup_aluguel_assets():
 
 
 def init_db():
-    from models import Institution, Asset, Snapshot, ExchangeRate, Loan, LoanSnapshot, Property, PropertyValuation, PropertyPhoto, PriceReference, CdiRate, ImportLog, ChatHistory, ChatUsage, Dividend, ManualAssetHistory, ImportSource, AppSettings, Report  # noqa: F401
+    from models import Institution, Asset, Snapshot, ExchangeRate, Loan, LoanSnapshot, Property, PropertyValuation, PropertyPhoto, PriceReference, CdiRate, ImportLog, ChatHistory, ChatUsage, Dividend, ManualAssetHistory, ImportSource, AppSettings, Report, PropertyRentalIncome  # noqa: F401
     Base.metadata.create_all(bind=engine)
     _run_migrations()
     _cleanup_aluguel_assets()

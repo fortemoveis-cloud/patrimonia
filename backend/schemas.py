@@ -203,6 +203,14 @@ class ManualAssetHistoryOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class RentalIncomeUpsert(BaseModel):
+    year: int
+    month: int          # 1–12
+    amount: float
+    currency: str = "BRL"
+    notes: Optional[str] = None
+
+
 class DividendCreate(BaseModel):
     asset_id: int
     payment_date: date

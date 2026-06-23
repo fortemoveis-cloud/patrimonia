@@ -124,7 +124,12 @@ function BackupPanel({ onClose }) {
 
 // ── Sidebar content ───────────────────────────────────────────────────────────
 function SidebarContent({ onClose, alertCount, importErrorCount, onBackup, onAlerts }) {
-  const [hovered, setHovered] = useState(null);
+  const [hovered,     setHovered]     = useState(null);
+  const [appVersion,  setAppVersion]  = useState("1.1.0");
+
+  useEffect(() => {
+    window.electronAPI?.getVersion().then(setAppVersion).catch(() => {});
+  }, []);
 
   const navStyle = (isActive, to) => ({
     background: isActive
@@ -248,7 +253,7 @@ function SidebarContent({ onClose, alertCount, importErrorCount, onBackup, onAle
             <span style={{ fontFamily: "Georgia, serif" }}>
               Patrimon<span style={{ color: "#7C5AAA" }}>IA</span>
             </span>
-            {" "}v1.0
+            {" "}v{appVersion}
           </p>
           <p style={{ fontSize: 10, color: C.mutedFaint, margin: "2px 0 0" }}>
             © 2026 PatrimonIA

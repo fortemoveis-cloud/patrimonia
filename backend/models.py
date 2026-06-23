@@ -141,6 +141,7 @@ class Property(Base):
         order_by="PropertyValuation.valuation_date.desc()",
     )
     photos = relationship("PropertyPhoto", back_populates="property", cascade="all, delete-orphan")
+    rental_income = relationship("PropertyRentalIncome", back_populates="property", cascade="all, delete-orphan")
 
 
 class PropertyPhoto(Base):
@@ -178,6 +179,23 @@ class PropertyValuation(Base):
     created_at        = Column(DateTime, server_default=func.now())
 
     property = relationship("Property", back_populates="valuations")
+
+
+class PropertyRentalIncome(Base):
+    __tablename__ = "property_rental_income"
+
+    id          = Column(Integer, primary_key=True, index=True)
+    property_id = Column(Integer, ForeignKey("properties.id"), nullable=False)
+    year        = Column(Integer, nullable=False)
+    month       = Column(Integer, nullable=False)   # 1–12
+    amount      = Column(Float, nullable=False)
+    currency    = Column(String, nullable=False, default="BRL")
+    notes       = Column(String)
+    created_at  = Column(DateTime, server_default=func.now())
+
+    property = relationship("Property", back_populates="rental_income")
+
+    __table_args__ = (UniqueConstraint("property_id", "year", "month", name="uq_rental_income_property_year_month"),)
 
 
 class Dividend(Base):

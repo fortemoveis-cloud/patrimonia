@@ -18,8 +18,8 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import CdiRate, ExchangeRate, Loan, Property, PropertyPhoto, PropertyValuation, PriceReference
-from schemas import PriceReferenceCreate, PropertyCreate, PropertyValuationCreate
+from models import CdiRate, ExchangeRate, Loan, Property, PropertyPhoto, PropertyValuation, PriceReference, PropertyRentalIncome
+from schemas import PriceReferenceCreate, PropertyCreate, PropertyValuationCreate, RentalIncomeUpsert
 import config
 
 router = APIRouter(prefix="/properties", tags=["properties"])
@@ -130,6 +130,44 @@ def _compute_rentability(prop: Property, current_brl: float, purchase_brl: float
     return result
 
 
+def _compute_rental_summary(db: Session, property_id: int, purchase_brl: float, current_brl: float) -> dict:
+    today = date.today()
+    rows = db.query(PropertyRentalIncome).filter(PropertyRentalIncome.property_id == property_id).all()
+
+    if not rows:
+        return {
+            "rental_total_received": None,
+            "rental_monthly_avg": None,
+            "rental_last_12m": None,
+            "rental_yield_on_purchase_pct": None,
+            "rental_yield_on_current_pct": None,
+            "rental_months_recorded": 0,
+        }
+
+    total = sum(r.amount for r in rows)
+    count = len(rows)
+    avg = total / count if count else 0.0
+    last_12m = sum(
+        r.amount for r in rows
+        if 0 <= (today.year - r.year) * 12 + (today.month - r.month) < 12
+    )
+
+    result: dict = {
+        "rental_total_received": round(total, 2),
+        "rental_monthly_avg": round(avg, 2),
+        "rental_last_12m": round(last_12m, 2),
+        "rental_months_recorded": count,
+        "rental_yield_on_purchase_pct": None,
+        "rental_yield_on_current_pct": None,
+    }
+    if last_12m > 0:
+        if purchase_brl and purchase_brl > 0:
+            result["rental_yield_on_purchase_pct"] = round(last_12m / purchase_brl * 100, 2)
+        if current_brl and current_brl > 0:
+            result["rental_yield_on_current_pct"] = round(last_12m / current_brl * 100, 2)
+    return result
+
+
 def _prop_dict(prop: Property, current_brl: float, usd_brl: float, db: Session) -> dict:
     purchase_brl = prop.purchase_price_brl or 0.0
     gain_brl     = current_brl - purchase_brl
@@ -175,6 +213,8 @@ def _prop_dict(prop: Property, current_brl: float, usd_brl: float, db: Session) 
     current_usd  = current_value_usd if current_value_usd else round(current_brl / usd_brl, 2)
     purchase_usd = prop.purchase_price_usd
 
+    rental = _compute_rental_summary(db, prop.id, purchase_brl, current_brl)
+
     return {
         "id":                   prop.id,
         "description":          prop.description,
@@ -206,6 +246,7 @@ def _prop_dict(prop: Property, current_brl: float, usd_brl: float, db: Session) 
         "zillow_zestimate_source": zillow_zestimate_source,
         "photos":               photos,
         **rent,
+        **rental,
     }
 
 
@@ -750,6 +791,98 @@ async def export_properties_xlsx(db: Session = Depends(get_db)):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="imoveis_{today_str}.xlsx"'},
     )
+
+
+# ── Rental Income ─────────────────────────────────────────────────────────────
+# This table is ONLY written by explicit user action — never by any automated process.
+
+@router.get("/{property_id}/rental-income")
+def list_rental_income(property_id: int, db: Session = Depends(get_db)):
+    if not db.query(Property).filter(Property.id == property_id).first():
+        raise HTTPException(status_code=404, detail="Property not found")
+    rows = (
+        db.query(PropertyRentalIncome)
+        .filter(PropertyRentalIncome.property_id == property_id)
+        .order_by(PropertyRentalIncome.year.desc(), PropertyRentalIncome.month.desc())
+        .all()
+    )
+    return [
+        {
+            "id":          r.id,
+            "property_id": r.property_id,
+            "year":        r.year,
+            "month":       r.month,
+            "amount":      r.amount,
+            "currency":    r.currency,
+            "notes":       r.notes,
+            "created_at":  r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in rows
+    ]
+
+
+@router.put("/{property_id}/rental-income")
+def upsert_rental_income(property_id: int, payload: RentalIncomeUpsert, db: Session = Depends(get_db)):
+    if not db.query(Property).filter(Property.id == property_id).first():
+        raise HTTPException(status_code=404, detail="Property not found")
+    if not 1 <= payload.month <= 12:
+        raise HTTPException(status_code=400, detail="month must be 1–12")
+
+    existing = (
+        db.query(PropertyRentalIncome)
+        .filter_by(property_id=property_id, year=payload.year, month=payload.month)
+        .first()
+    )
+    if existing:
+        existing.amount   = payload.amount
+        existing.currency = payload.currency
+        existing.notes    = payload.notes
+    else:
+        existing = PropertyRentalIncome(
+            property_id=property_id,
+            year=payload.year,
+            month=payload.month,
+            amount=payload.amount,
+            currency=payload.currency,
+            notes=payload.notes,
+        )
+        db.add(existing)
+    db.commit()
+    db.refresh(existing)
+    return {
+        "id":          existing.id,
+        "property_id": existing.property_id,
+        "year":        existing.year,
+        "month":       existing.month,
+        "amount":      existing.amount,
+        "currency":    existing.currency,
+        "notes":       existing.notes,
+        "created_at":  existing.created_at.isoformat() if existing.created_at else None,
+    }
+
+
+@router.delete("/{property_id}/rental-income/{year}/{month}")
+def delete_rental_income(property_id: int, year: int, month: int, db: Session = Depends(get_db)):
+    row = (
+        db.query(PropertyRentalIncome)
+        .filter_by(property_id=property_id, year=year, month=month)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Record not found")
+    db.delete(row)
+    db.commit()
+    return {"ok": True}
+
+
+@router.get("/{property_id}/rental-income/summary")
+def get_rental_income_summary(property_id: int, db: Session = Depends(get_db)):
+    prop = db.query(Property).filter(Property.id == property_id).first()
+    if not prop:
+        raise HTTPException(status_code=404, detail="Property not found")
+    purchase_brl = prop.purchase_price_brl or 0.0
+    current_brl  = _current_value(db, prop.id, purchase_brl)
+    return _compute_rental_summary(db, property_id, purchase_brl, current_brl)
 
 
 # ── Price references (FipeZAP alternative) ─────────────────────────────────────

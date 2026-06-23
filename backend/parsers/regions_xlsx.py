@@ -57,27 +57,77 @@ class RegionsXlsxParser(BaseParser):
             pass
         return False
 
+    def _extract_date_from_content(self, wb) -> Optional[date]:
+        """Try to find the portfolio date inside the xlsx (sheet name or header cells)."""
+        from datetime import datetime
+        # Sheet name suffix: Investment_temp_20260610 or Investment_temp_06/10/2026
+        for name in wb.sheetnames:
+            if name.startswith("Investment_temp_"):
+                suffix = name[len("Investment_temp_"):]
+                m = re.match(r"(\d{4})(\d{2})(\d{2})$", suffix)
+                if m:
+                    try:
+                        return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                    except ValueError:
+                        pass
+                m = re.match(r"(\d{1,2})[/-](\d{1,2})[/-](\d{4})$", suffix)
+                if m:
+                    try:
+                        return date(int(m.group(3)), int(m.group(1)), int(m.group(2)))
+                    except ValueError:
+                        pass
+        # First rows of target sheet: look for "as of MM/DD/YYYY" or "as of Month DD, YYYY"
+        target = None
+        for name in wb.sheetnames:
+            if name.startswith("Investment_temp_"):
+                target = wb[name]
+                break
+        if target is None and wb.sheetnames:
+            target = wb[wb.sheetnames[0]]
+        if target:
+            for row in target.iter_rows(min_row=1, max_row=15, values_only=True):
+                for cell in row:
+                    if not cell:
+                        continue
+                    s = str(cell).strip()
+                    m = re.search(r"as\s+of\s+(\d{1,2})/(\d{1,2})/(\d{4})", s, re.IGNORECASE)
+                    if m:
+                        try:
+                            return date(int(m.group(3)), int(m.group(1)), int(m.group(2)))
+                        except ValueError:
+                            pass
+                    m = re.search(r"as\s+of\s+(\w+)\s+(\d{1,2}),?\s*(\d{4})", s, re.IGNORECASE)
+                    if m:
+                        try:
+                            return datetime.strptime(
+                                f"{m.group(1)} {m.group(2)}, {m.group(3)}", "%B %d, %Y"
+                            ).date()
+                        except ValueError:
+                            pass
+        return None
+
     def _extract_date_from_filename(self, filename: str) -> Optional[date]:
-        # Try YYYY-MM-DD or YYYY_MM_DD
-        m = re.search(r"(\d{4})[-_](\d{2})[-_](\d{2})", filename)
-        if m:
-            try:
-                return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-            except ValueError:
-                pass
-        # Try MM-DD-YYYY (Regions format: Investments_05-27-2026_...)
-        m = re.search(r"(\d{2})-(\d{2})-(\d{4})", filename)
+        # Regions portal: Investments_MM-DD-YYYY_HH-MM-SS_{am/pm}.xlsx
+        # Anchor by underscores — prevents matching time component (e.g. 12-04-09 after the year)
+        m = re.search(r"_(\d{2})-(\d{2})-(\d{4})_", filename)
         if m:
             try:
                 return date(int(m.group(3)), int(m.group(1)), int(m.group(2)))
             except ValueError:
                 pass
-        return date.today()
+        # ISO with word boundaries (YYYY-MM-DD not inside a longer digit sequence)
+        m = re.search(r"(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)", filename)
+        if m:
+            try:
+                return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            except ValueError:
+                pass
+        return None
 
     def parse(self, filename: str, file_bytes: bytes) -> List[ParsedRecord]:
         # read_only=True truncates rows/cols for files without default styles; use default mode
         wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
-        snap_date = self._extract_date_from_filename(filename)
+        snap_date = self._extract_date_from_content(wb) or self._extract_date_from_filename(filename) or date.today()
         records: List[ParsedRecord] = []
 
         target_sheet = None

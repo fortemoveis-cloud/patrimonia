@@ -67,6 +67,9 @@ export const getPriceRefs = () => api.get("/properties/price-refs");
 export const upsertPriceRef = (payload) => api.post("/properties/price-refs", payload);
 export const deletePriceRef = (id) => api.delete(`/properties/price-refs/${id}`);
 export const getPropertyAlerts = () => api.get("/alerts/properties");
+export const getRentalIncome    = (id) => api.get(`/properties/${id}/rental-income`);
+export const upsertRentalIncome = (id, payload) => api.put(`/properties/${id}/rental-income`, payload);
+export const deleteRentalIncome = (id, year, month) => api.delete(`/properties/${id}/rental-income/${year}/${month}`);
 
 export const getMaturityAlerts = () => api.get("/alerts/maturity");
 export const updateAssetNotes = (id, notes) => api.put(`/portfolio/assets/${id}/notes`, { notes });

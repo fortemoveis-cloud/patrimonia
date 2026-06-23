@@ -33,31 +33,35 @@ class RegionsPdfParser(BaseParser):
         return False
 
     def _extract_date(self, filename: str, pdf) -> date:
+        from datetime import datetime
         try:
             text = pdf.pages[0].extract_text() or ""
             # "as of April 30, 2026"
             m = re.search(r"(?:as of|As of)\s+(\w+ \d+,\s*\d{4})", text)
             if m:
-                from datetime import datetime
                 return datetime.strptime(m.group(1).strip(), "%B %d, %Y").date()
-            # "Current Holding (05/27/2026)" or any MM/DD/YYYY in page
-            m = re.search(r"(\d{2})/(\d{2})/(\d{4})", text)
+            # "as of MM/DD/YYYY" (numeric)
+            m = re.search(r"(?:as of|As of)\s+(\d{2})/(\d{2})/(\d{4})", text)
+            if m:
+                return date(int(m.group(3)), int(m.group(1)), int(m.group(2)))
+            # "Current Holding (05/27/2026)" or "Current Holdings (05/27/2026)"
+            m = re.search(r"Current Holdings?\s*\((\d{2})/(\d{2})/(\d{4})\)", text, re.IGNORECASE)
             if m:
                 return date(int(m.group(3)), int(m.group(1)), int(m.group(2)))
         except Exception:
             pass
-        # Filename YYYY-MM-DD or YYYY_MM_DD
-        m = re.search(r"(\d{4})[-_](\d{2})[-_](\d{2})", filename)
-        if m:
-            try:
-                return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-            except ValueError:
-                pass
         # Filename MM-DD-YYYY (Regions portal format: Investments_05-27-2026_...)
         m = re.search(r"(\d{2})-(\d{2})-(\d{4})", filename)
         if m:
             try:
                 return date(int(m.group(3)), int(m.group(1)), int(m.group(2)))
+            except ValueError:
+                pass
+        # Filename YYYY-MM-DD or YYYY_MM_DD
+        m = re.search(r"(\d{4})[-_](\d{2})[-_](\d{2})", filename)
+        if m:
+            try:
+                return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
             except ValueError:
                 pass
         return date.today()
