@@ -1,7 +1,9 @@
 import axios from "axios";
 
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+
 const api = axios.create({
-  baseURL: "http://localhost:8000",
+  baseURL: API_URL,
   timeout: 30000,
 });
 
@@ -45,6 +47,11 @@ export const getLoans = () => api.get("/loans/");
 export const createLoan = (payload) => api.post("/loans/", payload);
 export const updateLoan = (id, payload) => api.put(`/loans/${id}`, payload);
 export const archiveLoan = (id) => api.delete(`/loans/${id}`);
+export const getLoanEvents    = (id)          => api.get(`/loans/${id}/events`);
+export const createLoanPayment = (id, payload) => api.post(`/loans/${id}/payments`, payload);
+export const payoffLoan       = (id, payload) => api.post(`/loans/${id}/payoff`, payload);
+export const setLoanBalance   = (id, payload) => api.post(`/loans/${id}/balance`, payload);
+export const deleteLoanEvent  = (id, eventId) => api.delete(`/loans/${id}/events/${eventId}`);
 
 export const getPropertySummary = () => api.get("/properties/summary");
 export const createProperty = (payload) => api.post("/properties/", payload);
@@ -86,7 +93,7 @@ export const getProjections = () => api.get("/portfolio/projections");
 export const getCdiComparison = (snapshotDate) => api.get("/portfolio/cdi-comparison", { params: snapshotDate ? { snapshot_date: snapshotDate } : {} });
 export const downloadPdf = (snapshotDate) => {
   const params = snapshotDate ? `?snapshot_date=${snapshotDate}` : "";
-  window.open(`http://localhost:8000/reports/pdf${params}`, "_blank");
+  window.open(`${API_URL}/reports/pdf${params}`, "_blank");
 };
 export const sendChatMessage = (message, conversation_history = []) =>
   api.post("/chat/message", { message, conversation_history });
@@ -94,6 +101,7 @@ export const getChatUsage = () => api.get("/chat/usage");
 
 export const getImportLogs  = (limit = 50) => api.get("/logs/imports", { params: { limit } });
 export const getImportStats = () => api.get("/logs/imports/stats");
+export const deleteImport   = (id) => api.delete(`/logs/imports/${id}`);
 
 export const getManualAssets       = ()           => api.get("/manual-assets/");
 export const createManualAsset     = (payload)    => api.post("/manual-assets/", payload);
@@ -115,11 +123,11 @@ export const generateReports     = (payload)      => api.post("/reports/generate
 export const getReport           = (id)           => api.get(`/reports/${id}`);
 export const downloadReportPdf   = (id, assetTypes) => {
   const qs = assetTypes ? `?asset_types=${encodeURIComponent(assetTypes)}` : "";
-  window.open(`http://localhost:8000/reports/${id}/pdf${qs}`, "_blank");
+  window.open(`${API_URL}/reports/${id}/pdf${qs}`, "_blank");
 };
 
-export const downloadSqlite = () => window.open("http://localhost:8000/backup/sqlite", "_blank");
-export const downloadJson   = () => window.open("http://localhost:8000/backup/json",   "_blank");
+export const downloadSqlite = () => window.open(`${API_URL}/backup/sqlite`, "_blank");
+export const downloadJson   = () => window.open(`${API_URL}/backup/json`,   "_blank");
 export const createBackup   = () => api.post("/backup/create");
 export const listBackups    = () => api.get("/backup/list");
 

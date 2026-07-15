@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { getImportLogs, getImportStats } from "../api/client";
-import { Activity, CheckCircle, AlertTriangle, XCircle, RefreshCw, ChevronDown, ChevronRight, Clock, FileText, Zap } from "lucide-react";
+import { getImportLogs, getImportStats, deleteImport } from "../api/client";
+import { Activity, CheckCircle, AlertTriangle, XCircle, RefreshCw, ChevronDown, ChevronRight, Clock, FileText, Zap, Trash2 } from "lucide-react";
 
 const STATUS_CONFIG = {
   success: { label: "Sucesso",  bg: "#dcfce7", color: "#16a34a", icon: CheckCircle },
@@ -37,7 +37,7 @@ function StatCard({ icon: Icon, label, value, sub, color }) {
   );
 }
 
-function LogRow({ log }) {
+function LogRow({ log, onDelete, deleting }) {
   const [expanded, setExpanded] = useState(false);
   const hasDetail = log.error_message || log.stack_trace;
   const dt = log.created_at ? new Date(log.created_at) : null;
@@ -70,10 +70,20 @@ function LogRow({ log }) {
         <td className="px-4 py-3 text-gray-300">
           {hasDetail && (expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />)}
         </td>
+        <td className="px-2 py-3 text-right">
+          <button
+            onClick={(e) => { e.stopPropagation(); onDelete(log); }}
+            disabled={deleting}
+            className="p-1.5 rounded-lg hover:bg-red-50 text-red-300 hover:text-red-500 transition-colors disabled:opacity-40"
+            title="Excluir importação (remove os dados deste arquivo nesta data)"
+          >
+            <Trash2 size={13} />
+          </button>
+        </td>
       </tr>
       {expanded && hasDetail && (
         <tr className="bg-red-50 border-b border-red-100">
-          <td colSpan={8} className="px-6 py-4">
+          <td colSpan={9} className="px-6 py-4">
             {log.error_message && (
               <div className="mb-3">
                 <p className="text-xs font-semibold text-red-700 mb-1">Mensagem de erro</p>
@@ -98,9 +108,10 @@ function LogRow({ log }) {
 }
 
 export default function Logs() {
-  const [logs,    setLogs]    = useState([]);
-  const [stats,   setStats]   = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [logs,     setLogs]     = useState([]);
+  const [stats,    setStats]    = useState(null);
+  const [loading,  setLoading]  = useState(true);
+  const [deleting, setDeleting] = useState(false);
 
   const load = () => {
     setLoading(true);
@@ -111,6 +122,28 @@ export default function Logs() {
   };
 
   useEffect(() => { load(); }, []);
+
+  const handleDelete = async (log) => {
+    const msg = log.snapshot_date
+      ? `Excluir a importação "${log.filename}" (posição de ${log.snapshot_date})?\n\n` +
+        `Todas as posições importadas deste arquivo nesta data serão removidas. ` +
+        `Ativos manuais NÃO são afetados. Um backup do banco é criado automaticamente antes.`
+      : `Excluir este registro de log ("${log.filename}")?\n\nEsta importação não criou dados — apenas o registro será removido.`;
+    if (!window.confirm(msg)) return;
+    setDeleting(true);
+    try {
+      const r = await deleteImport(log.id);
+      if (log.snapshot_date) {
+        const extra = r.data.assets_deleted > 0 ? `, ${r.data.assets_deleted} ativo(s) removido(s)` : "";
+        window.alert(`Importação excluída: ${r.data.snapshots_deleted} posição(ões)${extra}.`);
+      }
+      load();
+    } catch (err) {
+      window.alert(err?.response?.data?.detail || "Erro ao excluir a importação.");
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   const successRate = stats ? Math.round(stats.success_rate * 100) : 0;
   const lastError = logs.find((l) => l.status !== "success");
@@ -181,7 +214,7 @@ export default function Logs() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-gray-100">
-                  {["Data/Hora", "Arquivo", "Parser", "Instituição", "Status", "Registros", "Tempo", ""].map((h) => (
+                  {["Data/Hora", "Arquivo", "Parser", "Instituição", "Status", "Registros", "Tempo", "", " "].map((h) => (
                     <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-gray-400 uppercase tracking-wide whitespace-nowrap">
                       {h}
                     </th>
@@ -189,7 +222,9 @@ export default function Logs() {
                 </tr>
               </thead>
               <tbody>
-                {logs.map((log) => <LogRow key={log.id} log={log} />)}
+                {logs.map((log) => (
+                  <LogRow key={log.id} log={log} onDelete={handleDelete} deleting={deleting} />
+                ))}
               </tbody>
             </table>
           </div>

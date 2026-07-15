@@ -20,11 +20,15 @@ const SUB_COLOR = {
   red:   "text-red-500",
 };
 
-export default function StatCard({ title, value, sub, subColor, color = "blue", trend, icon: Icon }) {
+export default function StatCard({ title, value, sub, subColor, color = "blue", trend, icon: Icon, onClick }) {
   const ic = ICON_STYLE[color] || ICON_STYLE.blue;
   const subCls = subColor ? (SUB_COLOR[subColor] || "text-gray-400") : "text-gray-400";
   return (
-    <div className="card">
+    <div
+      className={`card ${onClick ? "cursor-pointer hover:shadow-md transition-shadow" : ""}`}
+      onClick={onClick}
+      role={onClick ? "button" : undefined}
+    >
       <div className="flex items-start justify-between gap-3">
         <div className="flex-1 min-w-0">
           <p className="text-xs text-gray-400 uppercase tracking-wider mb-2 font-medium">{title}</p>

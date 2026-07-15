@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo, useCallback } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   getSnapshots, getDates, updateAssetNotes, updateExpectedIncome,
   getCdiComparison, downloadPdf,
@@ -392,11 +392,14 @@ function DetailRow({ s, divSummary, onDividendChange }) {
 // ── Main Portfolio ─────────────────────────────────────────────────────────────
 
 export default function Portfolio() {
+  // Query params vindos dos atalhos do dashboard:
+  // ?institution=<nome cru> ?type=<asset_type> ?date=<YYYY-MM-DD>
+  const [searchParams] = useSearchParams();
   const [snapshots,   setSnapshots]   = useState([]);
   const [dates,       setDates]       = useState([]);
   const [selected,    setSelected]    = useState(null);
-  const [search,      setSearch]      = useState("");
-  const [typeFilter,  setTypeFilter]  = useState("");
+  const [search,      setSearch]      = useState(searchParams.get("institution") || "");
+  const [typeFilter,  setTypeFilter]  = useState(searchParams.get("type") || "");
   const [loading,     setLoading]     = useState(true);
   const [page,        setPage]        = useState(0);
   const [expandedId,  setExpandedId]  = useState(null);
@@ -431,9 +434,14 @@ export default function Portfolio() {
   useEffect(() => {
     getDates().then((r) => {
       setDates(r.data);
-      if (r.data.length) setSelected(r.data[0]);
+      // ?date= abre a Carteira na data daquela fonte — sem isso, uma
+      // instituição importada em data antiga apareceria vazia aqui.
+      const paramDate = searchParams.get("date");
+      if (paramDate && r.data.includes(paramDate)) setSelected(paramDate);
+      else if (r.data.length) setSelected(r.data[0]);
     });
     loadDivSummary();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadDivSummary]);
 
   useEffect(() => {

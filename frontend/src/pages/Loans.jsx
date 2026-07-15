@@ -1,7 +1,10 @@
 import { useEffect, useState } from "react";
-import { getLoanSummary, createLoan, updateLoan, archiveLoan } from "../api/client";
+import {
+  getLoanSummary, createLoan, archiveLoan,
+  getLoanEvents, createLoanPayment, payoffLoan, setLoanBalance, deleteLoanEvent,
+} from "../api/client";
 import StatCard from "../components/StatCard";
-import { CreditCard, Plus, X, Check, Trash2 } from "lucide-react";
+import { CreditCard, Plus, X, Trash2, ChevronDown, ChevronUp, Banknote, CheckCircle2 } from "lucide-react";
 
 const INSTITUTIONS = ["Regions Bank", "XP Investimentos", "Banco Inter"];
 
@@ -10,6 +13,14 @@ const fmtMoney = (v, currency = "USD") =>
 
 const fmtUSD = (v) => fmtMoney(v, "USD");
 const fmtBRL = (v) => fmtMoney(v, "BRL");
+const fmtDate = (s) => { if (!s) return "—"; const [y, m, d] = s.split("-"); return `${d}/${m}/${y}`; };
+const todayISO = () => new Date().toISOString().slice(0, 10);
+
+const EVENT_LABELS = {
+  balance_set: "Ajuste de saldo",
+  payment:     "Pagamento",
+  payoff:      "Quitação",
+};
 
 const EMPTY_FORM = {
   description: "",
@@ -36,8 +47,13 @@ export default function Loans() {
   const [showForm, setShowForm] = useState(false);
   const [form, setForm]         = useState(EMPTY_FORM);
   const [saving, setSaving]     = useState(false);
-  const [editingId, setEditingId]     = useState(null);
-  const [editBalance, setEditBalance] = useState("");
+  const [error, setError]       = useState(null);
+
+  // Histórico expandido: loanId → events[]
+  const [expanded, setExpanded] = useState({});
+  // Lançamento inline: { loanId, mode: 'payment' | 'balance' } | null
+  const [entry, setEntry]       = useState(null);
+  const [entryForm, setEntryForm] = useState({ amount: "", date: todayISO(), notes: "" });
 
   const refresh = () => {
     setLoading(true);
@@ -50,9 +66,13 @@ export default function Loans() {
 
   const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
 
+  const apiError = (err, fallback) =>
+    setError(err?.response?.data?.detail || fallback);
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setSaving(true);
+    setError(null);
     try {
       await createLoan({
         ...form,
@@ -65,28 +85,76 @@ export default function Loans() {
       setForm(EMPTY_FORM);
       setShowForm(false);
       refresh();
+    } catch (err) {
+      apiError(err, "Erro ao salvar empréstimo.");
     } finally {
       setSaving(false);
     }
   };
 
-  const handleUpdateBalance = async (loan) => {
-    if (editBalance === "") return;
+  const loadEvents = async (loanId) => {
+    const r = await getLoanEvents(loanId);
+    setExpanded((prev) => ({ ...prev, [loanId]: r.data }));
+  };
+
+  const toggleHistory = async (loanId) => {
+    if (expanded[loanId] !== undefined) {
+      setExpanded((prev) => { const n = { ...prev }; delete n[loanId]; return n; });
+      return;
+    }
+    await loadEvents(loanId);
+  };
+
+  const afterEvent = async (loanId) => {
+    setEntry(null);
+    setEntryForm({ amount: "", date: todayISO(), notes: "" });
+    refresh();
+    if (expanded[loanId] !== undefined) await loadEvents(loanId);
+  };
+
+  const handleSaveEntry = async (loan) => {
+    if (entryForm.amount === "" || !entryForm.date) return;
     setSaving(true);
+    setError(null);
     try {
-      await updateLoan(loan.id, {
-        description:         loan.description,
-        institution_name:    loan.institution_name,
-        currency:            loan.currency,
-        outstanding_balance: parseFloat(editBalance),
-        interest_rate:       loan.interest_rate,
-        maturity_date:       loan.maturity_date,
-      });
-      setEditingId(null);
-      setEditBalance("");
-      refresh();
+      const payload = {
+        amount: parseFloat(entryForm.amount),
+        date:   entryForm.date,
+        notes:  entryForm.notes || null,
+      };
+      if (entry.mode === "payment") await createLoanPayment(loan.id, payload);
+      else                          await setLoanBalance(loan.id, payload);
+      await afterEvent(loan.id);
+    } catch (err) {
+      apiError(err, "Erro ao registrar o lançamento.");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handlePayoff = async (loan) => {
+    if (!window.confirm(`Quitar "${loan.description}"? O saldo devedor será zerado (o histórico fica registrado).`)) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await payoffLoan(loan.id, { date: todayISO(), notes: null });
+      await afterEvent(loan.id);
+    } catch (err) {
+      apiError(err, "Erro ao quitar o empréstimo.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDeleteEvent = async (loanId, ev) => {
+    if (!window.confirm(`Remover o lançamento "${EVENT_LABELS[ev.event_type]}" de ${fmtDate(ev.event_date)}? O saldo será recalculado.`)) return;
+    setError(null);
+    try {
+      await deleteLoanEvent(loanId, ev.id);
+      refresh();
+      await loadEvents(loanId);
+    } catch (err) {
+      apiError(err, "Erro ao remover o lançamento.");
     }
   };
 
@@ -94,6 +162,11 @@ export default function Loans() {
     if (!window.confirm("Arquivar este empréstimo?")) return;
     await archiveLoan(id);
     refresh();
+  };
+
+  const openEntry = (loanId, mode) => {
+    setEntry({ loanId, mode });
+    setEntryForm({ amount: "", date: todayISO(), notes: "" });
   };
 
   const loans = summary?.loans ?? [];
@@ -118,6 +191,14 @@ export default function Loans() {
           {showForm ? "Cancelar" : "Novo Empréstimo"}
         </button>
       </div>
+
+      {error && (
+        <div className="rounded-xl px-4 py-3 flex items-center justify-between text-sm font-medium text-red-700"
+          style={{ background: "#fef2f2", border: "1px solid #fecaca" }}>
+          <span>{error}</span>
+          <button onClick={() => setError(null)} className="text-red-400 hover:text-red-600"><X size={14} /></button>
+        </div>
+      )}
 
       {/* Summary cards */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -244,77 +325,23 @@ export default function Loans() {
               </thead>
               <tbody>
                 {loans.map((loan, idx) => (
-                  <tr
+                  <LoanRows
                     key={loan.id}
-                    className={`transition-colors hover:bg-[#eef2ff] ${idx % 2 === 0 ? "bg-white" : "bg-[#f8f9fc]"}`}
-                    style={{ borderBottom: "1px solid #f9fafb" }}
-                  >
-                    <td className="px-4 py-3 font-bold" style={{ color: "#1a1a2e" }}>{loan.description}</td>
-                    <td className="px-4 py-3 text-sm" style={{ color: "#4a4a6a" }}>{loan.institution_name || "—"}</td>
-                    <td className="px-4 py-3 font-mono text-xs font-semibold" style={{ color: "#4a4a6a" }}>{loan.currency}</td>
-                    <td className="px-4 py-3 text-right font-mono font-semibold" style={{ color: "#c0392b" }}>
-                      {editingId === loan.id ? (
-                        <input
-                          type="number"
-                          step="0.01"
-                          value={editBalance}
-                          onChange={(e) => setEditBalance(e.target.value)}
-                          className="input-base text-right w-40 text-sm"
-                          autoFocus
-                        />
-                      ) : (
-                        fmtMoney(loan.outstanding_balance, loan.currency)
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-right font-mono text-sm" style={{ color: "#4a4a6a" }}>
-                      {loan.interest_rate != null ? `${(loan.interest_rate * 100).toFixed(2)}%` : "—"}
-                    </td>
-                    <td className="px-4 py-3 text-right text-xs" style={{ color: "#4a4a6a" }}>
-                      {loan.maturity_date || "—"}
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="flex items-center justify-end gap-1">
-                        {editingId === loan.id ? (
-                          <>
-                            <button
-                              onClick={() => handleUpdateBalance(loan)}
-                              disabled={saving}
-                              className="p-1.5 rounded-lg hover:bg-green-50 transition-colors"
-                              style={{ color: "#16a34a" }}
-                              title="Confirmar"
-                            >
-                              <Check size={14} />
-                            </button>
-                            <button
-                              onClick={() => { setEditingId(null); setEditBalance(""); }}
-                              className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 transition-colors"
-                              title="Cancelar"
-                            >
-                              <X size={14} />
-                            </button>
-                          </>
-                        ) : (
-                          <>
-                            <button
-                              onClick={() => { setEditingId(loan.id); setEditBalance(String(loan.outstanding_balance ?? "")); }}
-                              className="text-xs font-medium px-2.5 py-1 rounded-lg hover:bg-purple-50 transition-colors"
-                              style={{ color: "#4a148c" }}
-                            >
-                              Editar
-                            </button>
-                            <button
-                              onClick={() => handleArchive(loan.id)}
-                              className="p-1.5 rounded-lg hover:bg-red-50 transition-colors"
-                              style={{ color: "#dc2626" }}
-                              title="Arquivar"
-                            >
-                              <Trash2 size={14} />
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
+                    loan={loan}
+                    idx={idx}
+                    saving={saving}
+                    events={expanded[loan.id]}
+                    entry={entry?.loanId === loan.id ? entry : null}
+                    entryForm={entryForm}
+                    setEntryForm={setEntryForm}
+                    onToggleHistory={() => toggleHistory(loan.id)}
+                    onOpenEntry={(mode) => openEntry(loan.id, mode)}
+                    onCancelEntry={() => setEntry(null)}
+                    onSaveEntry={() => handleSaveEntry(loan)}
+                    onPayoff={() => handlePayoff(loan)}
+                    onDeleteEvent={(ev) => handleDeleteEvent(loan.id, ev)}
+                    onArchive={() => handleArchive(loan.id)}
+                  />
                 ))}
               </tbody>
             </table>
@@ -322,5 +349,207 @@ export default function Loans() {
         </div>
       )}
     </div>
+  );
+}
+
+function LoanRows({
+  loan, idx, saving, events, entry, entryForm, setEntryForm,
+  onToggleHistory, onOpenEntry, onCancelEntry, onSaveEntry,
+  onPayoff, onDeleteEvent, onArchive,
+}) {
+  const isPaidOff = loan.paid_off || loan.outstanding_balance === 0;
+  const isExpanded = events !== undefined;
+
+  return (
+    <>
+      <tr
+        className={`transition-colors hover:bg-[#eef2ff] ${idx % 2 === 0 ? "bg-white" : "bg-[#f8f9fc]"}`}
+        style={{ borderBottom: "1px solid #f9fafb" }}
+      >
+        <td className="px-4 py-3 font-bold" style={{ color: "#1a1a2e" }}>
+          <span className="flex items-center gap-2">
+            {loan.description}
+            {isPaidOff && (
+              <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full"
+                style={{ background: "#dcfce7", color: "#15803d" }}>
+                <CheckCircle2 size={10} /> Quitado
+              </span>
+            )}
+          </span>
+        </td>
+        <td className="px-4 py-3 text-sm" style={{ color: "#4a4a6a" }}>{loan.institution_name || "—"}</td>
+        <td className="px-4 py-3 font-mono text-xs font-semibold" style={{ color: "#4a4a6a" }}>{loan.currency}</td>
+        <td className="px-4 py-3 text-right font-mono font-semibold" style={{ color: isPaidOff ? "#16a34a" : "#c0392b" }}>
+          {fmtMoney(loan.outstanding_balance, loan.currency)}
+        </td>
+        <td className="px-4 py-3 text-right font-mono text-sm" style={{ color: "#4a4a6a" }}>
+          {loan.interest_rate != null ? `${(loan.interest_rate * 100).toFixed(2)}%` : "—"}
+        </td>
+        <td className="px-4 py-3 text-right text-xs" style={{ color: "#4a4a6a" }}>
+          {loan.maturity_date || "—"}
+        </td>
+        <td className="px-4 py-3">
+          <div className="flex items-center justify-end gap-1 flex-wrap">
+            {!isPaidOff && (
+              <button
+                onClick={() => onOpenEntry("payment")}
+                className="text-xs font-medium px-2.5 py-1 rounded-lg hover:bg-green-50 transition-colors flex items-center gap-1"
+                style={{ color: "#15803d" }}
+                title="Registrar pagamento (abate o saldo)"
+              >
+                <Banknote size={12} /> Pagamento
+              </button>
+            )}
+            {!isPaidOff && (
+              <button
+                onClick={onPayoff}
+                disabled={saving}
+                className="text-xs font-medium px-2.5 py-1 rounded-lg hover:bg-green-50 transition-colors"
+                style={{ color: "#15803d" }}
+                title="Quitar (zera o saldo devedor)"
+              >
+                Quitar
+              </button>
+            )}
+            <button
+              onClick={() => onOpenEntry("balance")}
+              className="text-xs font-medium px-2.5 py-1 rounded-lg hover:bg-purple-50 transition-colors"
+              style={{ color: "#4a148c" }}
+              title="Definir o saldo devedor nesta data"
+            >
+              Ajustar Saldo
+            </button>
+            <button
+              onClick={onToggleHistory}
+              className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 transition-colors"
+              title="Histórico de lançamentos"
+            >
+              {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+            </button>
+            <button
+              onClick={onArchive}
+              className="p-1.5 rounded-lg hover:bg-red-50 transition-colors"
+              style={{ color: "#dc2626" }}
+              title="Arquivar"
+            >
+              <Trash2 size={14} />
+            </button>
+          </div>
+        </td>
+      </tr>
+
+      {/* Lançamento inline (pagamento ou ajuste de saldo) */}
+      {entry && (
+        <tr style={{ background: entry.mode === "payment" ? "#f0fdf4" : "#faf5ff" }}>
+          <td colSpan={7} className="px-4 py-3">
+            <div className="flex items-center gap-3 flex-wrap">
+              <p className="text-xs font-semibold" style={{ color: entry.mode === "payment" ? "#15803d" : "#4a148c" }}>
+                {entry.mode === "payment"
+                  ? <>Registrar pagamento de <strong>{loan.description}</strong>:</>
+                  : <>Novo saldo devedor de <strong>{loan.description}</strong>:</>}
+              </p>
+              <input
+                type="number" step="0.01" min={entry.mode === "payment" ? "0.01" : "0"}
+                placeholder={`Valor (${loan.currency})`}
+                value={entryForm.amount}
+                onChange={(e) => setEntryForm((f) => ({ ...f, amount: e.target.value }))}
+                className="input-base text-sm w-40"
+                autoFocus
+              />
+              <input
+                type="date"
+                value={entryForm.date}
+                max={todayISO()}
+                onChange={(e) => setEntryForm((f) => ({ ...f, date: e.target.value }))}
+                className="input-base text-sm"
+              />
+              <input
+                type="text"
+                placeholder="Observação (opcional)"
+                value={entryForm.notes}
+                onChange={(e) => setEntryForm((f) => ({ ...f, notes: e.target.value }))}
+                className="input-base text-sm w-56"
+              />
+              <button
+                onClick={onSaveEntry}
+                disabled={saving || entryForm.amount === "" || !entryForm.date}
+                className="text-sm px-4 py-1.5 rounded-lg font-medium text-white disabled:opacity-50"
+                style={{ background: entry.mode === "payment" ? "#15803d" : "#4a148c" }}
+              >
+                {saving ? "…" : "Salvar"}
+              </button>
+              <button onClick={onCancelEntry} className="text-xs text-gray-400 hover:text-gray-600">
+                Cancelar
+              </button>
+            </div>
+          </td>
+        </tr>
+      )}
+
+      {/* Histórico expandido */}
+      {isExpanded && (
+        <tr style={{ background: "#f8fafc", borderBottom: "1px solid #f3f4f6" }}>
+          <td colSpan={7} className="px-6 py-3">
+            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
+              Histórico de lançamentos
+            </p>
+            {events.length === 0 ? (
+              <p className="text-xs text-gray-400">Sem lançamentos registrados.</p>
+            ) : (
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-[10px] uppercase text-gray-400 font-semibold border-b border-gray-200">
+                    <th className="text-left pb-1 pr-3">Data</th>
+                    <th className="text-left pb-1 pr-3">Tipo</th>
+                    <th className="text-right pb-1 pr-3">Valor</th>
+                    <th className="text-right pb-1 pr-3">Saldo Resultante</th>
+                    <th className="text-left pb-1 pl-3">Obs.</th>
+                    <th />
+                  </tr>
+                </thead>
+                <tbody>
+                  {events.map((ev) => (
+                    <tr key={ev.id} className="border-b border-gray-100 hover:bg-white">
+                      <td className="py-1.5 pr-3 text-gray-600">{fmtDate(ev.event_date)}</td>
+                      <td className="py-1.5 pr-3">
+                        <span
+                          className="px-1.5 py-0.5 rounded-full text-[10px] font-semibold"
+                          style={ev.event_type === "payment"
+                            ? { background: "#dcfce7", color: "#15803d" }
+                            : ev.event_type === "payoff"
+                              ? { background: "#dbeafe", color: "#1d4ed8" }
+                              : { background: "#f3e8ff", color: "#7e22ce" }}
+                        >
+                          {EVENT_LABELS[ev.event_type] || ev.event_type}
+                        </span>
+                      </td>
+                      <td className="py-1.5 pr-3 text-right font-mono font-semibold"
+                        style={{ color: ev.event_type === "payment" ? "#15803d" : "#4a4a6a" }}>
+                        {ev.amount != null
+                          ? `${ev.event_type === "payment" ? "−" : ""}${fmtMoney(ev.amount, loan.currency)}`
+                          : "—"}
+                      </td>
+                      <td className="py-1.5 pr-3 text-right font-mono font-semibold" style={{ color: "#1a1a2e" }}>
+                        {fmtMoney(ev.resulting_balance, loan.currency)}
+                      </td>
+                      <td className="py-1.5 pl-3 text-gray-400 truncate max-w-[180px]">{ev.notes || "—"}</td>
+                      <td className="py-1.5 pl-1 text-right">
+                        <button
+                          onClick={() => onDeleteEvent(ev)}
+                          className="p-0.5 rounded hover:bg-red-50 text-red-300 hover:text-red-500 transition-colors"
+                          title="Remover lançamento (recalcula o saldo)"
+                        >
+                          <Trash2 size={11} />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </td>
+        </tr>
+      )}
+    </>
   );
 }

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { getSummary, getDates, getLoanSummary, getPropertySummary, getMaturityAlerts, getRiskAnalysis, getProjections, getImportStats, downloadPdf } from "../api/client";
 import StatCard from "../components/StatCard";
 import DonutChart from "../components/DonutChart";
@@ -26,6 +27,7 @@ const TYPE_LABELS = {
 };
 
 export default function Dashboard() {
+  const navigate = useNavigate();
   const [summary, setSummary]           = useState(null);
   const [loanSummary, setLoanSummary]   = useState(null);
   const [propSummary, setPropSummary]   = useState(null);
@@ -87,11 +89,12 @@ export default function Dashboard() {
   const cbBRL    = brlCurr.cost_basis_brl ?? 0;
   const cbBRLUSD = brlCurr.cost_basis_usd ?? 0;
 
-  const gainBRL = summary.total_market_value_brl - (summary.total_cost_basis_brl ?? 0);
-  const gainUSD = summary.total_market_value_usd - summary.total_cost_basis_usd;
-  const gainPct = (summary.total_cost_basis_brl ?? 0) > 0
-    ? (gainBRL / (summary.total_cost_basis_brl ?? 1)) * 100
-    : 0;
+  // Ganho calculado pelo backend só sobre ativos COM custo de aquisição —
+  // evita contar ativo manual (sem custo) como 100% de ganho.
+  const gainBRL = summary.total_gain_brl ?? (summary.total_market_value_brl - (summary.total_cost_basis_brl ?? 0));
+  const gainUSD = summary.total_gain_usd ?? (summary.total_market_value_usd - summary.total_cost_basis_usd);
+  const gainCostBRL = summary.gain_cost_basis_brl ?? summary.total_cost_basis_brl ?? 0;
+  const gainPct = gainCostBRL > 0 ? (gainBRL / gainCostBRL) * 100 : 0;
 
   // ── Properties ───────────────────────────────────────────────────────────────
   const loanUSD = loanSummary?.total_usd ?? 0;
@@ -110,12 +113,19 @@ export default function Dashboard() {
   const netUSD = summary.total_market_value_usd + propUSD - loanUSD;
   const netBRL = summary.total_market_value_brl + propBRL - loanBRL;
 
+  // Cotação BRL/USD implícita nos totais (para conversões locais); null se
+  // não houver base — evita o antigo `|| 5` que falhava com Infinity.
+  const usdBrlRate = summary.usd_brl_rate
+    || (propUSD > 0 && propBRL > 0 ? propBRL / propUSD : null);
+  const brlToUsd = (v) => (usdBrlRate ? v / usdBrlRate : null);
+  const fmtOrDash = (v, currency) => (v == null ? "—" : fmt(v, currency));
+
   const hasBothCountries = propSummary && propSummary.count_brasil > 0 && propSummary.count_usa > 0;
   const distData = [
     { name: "Invest. Financeiros", value: summary.total_market_value_usd, value_brl: summary.total_market_value_brl },
     ...(hasBothCountries
       ? [
-          { name: "Imóveis 🇧🇷 Brasil", value: (propSummary.total_brl_brasil || 0) / (propUSD > 0 ? propBRL / propUSD : 5), value_brl: propSummary.total_brl_brasil || 0 },
+          { name: "Imóveis 🇧🇷 Brasil", value: brlToUsd(propSummary.total_brl_brasil || 0) ?? 0, value_brl: propSummary.total_brl_brasil || 0 },
           { name: "Imóveis 🇺🇸 EUA",    value: propSummary.total_usd_usa || 0, value_brl: propSummary.total_brl_usa || 0 },
         ]
       : propUSD > 0 ? [{ name: "Imóveis", value: propUSD, value_brl: propBRL }] : []
@@ -125,15 +135,25 @@ export default function Dashboard() {
 
   const byTypeData = summary.by_asset_type.map((d) => ({
     name: TYPE_LABELS[d.type] || d.type,
+    type: d.type,
     value: Math.abs(d.market_value_usd),
     value_brl: Math.abs(d.market_value_brl),
   }));
 
   const byInstData = summary.by_institution.map((d) => ({
     name: d.name,
+    institution_name: d.institution_name,
+    snapshot_date: d.snapshot_date,
     value: Math.abs(d.market_value_usd),
     value_brl: Math.abs(d.market_value_brl),
   }));
+
+  const goToPortfolioByInstitution = (d) => {
+    const params = new URLSearchParams();
+    if (d.institution_name) params.set("institution", d.institution_name);
+    if (d.snapshot_date) params.set("date", d.snapshot_date);
+    navigate(`/portfolio?${params.toString()}`);
+  };
 
   const fmtUSD = (v) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(v ?? 0);
 
@@ -170,7 +190,7 @@ export default function Dashboard() {
         <div
           className="rounded-xl px-4 py-3 flex items-center gap-3 cursor-pointer hover:opacity-90 transition-opacity"
           style={{ background: "#fef2f2", border: "1px solid #fecaca" }}
-          onClick={() => window.location.href = "/logs"}
+          onClick={() => navigate("/logs")}
         >
           <Activity size={18} style={{ color: "#dc2626", flexShrink: 0 }} />
           <p className="text-sm font-medium text-red-700">
@@ -187,7 +207,7 @@ export default function Dashboard() {
         <div
           className="rounded-xl px-4 py-3 flex items-center gap-3 cursor-pointer hover:opacity-90 transition-opacity"
           style={{ background: alerts.critical > 0 ? "#fef2f2" : "#fffbeb", border: `1px solid ${alerts.critical > 0 ? "#fecaca" : "#fde68a"}` }}
-          onClick={() => window.location.href = "/alerts"}
+          onClick={() => navigate("/alerts")}
         >
           <AlertTriangle size={18} style={{ color: alerts.critical > 0 ? "#dc2626" : "#d97706", flexShrink: 0 }} />
           <p className="text-sm font-medium" style={{ color: alerts.critical > 0 ? "#dc2626" : "#d97706" }}>
@@ -195,6 +215,20 @@ export default function Dashboard() {
               ? `${alerts.critical} título(s) vencendo em até 30 dias!`
               : `${alerts.warning} título(s) vencendo em 31–60 dias.`}
             {" "}<span className="underline">Ver alertas →</span>
+          </p>
+        </div>
+      )}
+
+      {/* Cotação indisponível */}
+      {summary?.rate_fallback && (
+        <div
+          className="rounded-xl px-4 py-3 flex items-center gap-3"
+          style={{ background: "#fef2f2", border: "1px solid #fecaca" }}
+        >
+          <AlertTriangle size={18} style={{ color: "#dc2626", flexShrink: 0 }} />
+          <p className="text-sm font-medium text-red-700">
+            Cotação USD/BRL indisponível — valores convertidos podem estar incorretos.
+            Verifique sua conexão e recarregue o app.
           </p>
         </div>
       )}
@@ -265,8 +299,8 @@ export default function Dashboard() {
           />
           <StatCard
             title="Ganhos Não Realizados"
-            value={fmt(Math.abs(gainBRL), "BRL")}
-            sub={`${fmt(Math.abs(gainUSD), "USD")} · ${gainPct.toFixed(2)}% s/ custo`}
+            value={fmt(gainBRL, "BRL")}
+            sub={`${fmt(gainUSD, "USD")} · ${gainPct.toFixed(2)}% s/ custo`}
             subColor={gainBRL >= 0 ? "blue" : "red"}
             color={gainBRL >= 0 ? "green" : "red"}
             trend={gainPct}
@@ -282,10 +316,11 @@ export default function Dashboard() {
           <StatCard
             title="Imóveis (BRL)"
             value={fmt(propBRLBrasil, "BRL")}
-            sub={propSummary?.count_brasil ? `${propSummary.count_brasil} imóvel(eis) · ${fmt(propBRLBrasil / ((propBRL / propUSD) || 5), "USD")}` : fmt(0, "USD")}
+            sub={propSummary?.count_brasil ? `${propSummary.count_brasil} imóvel(eis) · ${fmtOrDash(brlToUsd(propBRLBrasil), "USD")}` : fmt(0, "USD")}
             subColor="blue"
             color="green"
             icon={Home}
+            onClick={() => navigate("/properties")}
           />
           <StatCard
             title="Imóveis (USD)"
@@ -294,6 +329,7 @@ export default function Dashboard() {
             subColor="green"
             color="blue"
             icon={Building2}
+            onClick={() => navigate("/properties")}
           />
           <StatCard
             title="Total Empréstimos (USD)"
@@ -302,11 +338,12 @@ export default function Dashboard() {
             subColor="green"
             color="red"
             icon={CreditCard}
+            onClick={() => navigate("/loans")}
           />
           <StatCard
             title="Patrimônio Total (USD)"
-            value={fmt(Math.abs(netUSD), "USD")}
-            sub={`Invest. + Imóveis − Dívidas · ${fmt(Math.abs(netBRL), "BRL")}`}
+            value={fmt(netUSD, "USD")}
+            sub={`Invest. + Imóveis − Dívidas · ${fmt(netBRL, "BRL")}`}
             subColor="green"
             color={netUSD >= 0 ? "green" : "red"}
             trend={(summary.total_market_value_usd + propUSD) > 0 ? (netUSD / (summary.total_market_value_usd + propUSD)) * 100 : 0}
@@ -323,21 +360,23 @@ export default function Dashboard() {
             {propSummary.count_brasil > 0 && (
               <StatCard
                 title="Ganho Imóveis (BRL)"
-                value={fmt(Math.abs(gainPropBRLBrasil), "BRL")}
-                sub={fmt(Math.abs(gainPropBRLBrasil / ((propBRL / propUSD) || 5)), "USD")}
+                value={fmt(gainPropBRLBrasil, "BRL")}
+                sub={fmtOrDash(brlToUsd(gainPropBRLBrasil), "USD")}
                 subColor={gainPropBRLBrasil >= 0 ? "blue" : "red"}
                 color={gainPropBRLBrasil >= 0 ? "green" : "red"}
                 icon={gainPropBRLBrasil >= 0 ? TrendingUp : TrendingDown}
+                onClick={() => navigate("/properties")}
               />
             )}
             {propSummary.count_usa > 0 && (
               <StatCard
                 title="Ganho Imóveis (USD)"
-                value={fmt(Math.abs(gainPropUSDUsa), "USD")}
-                sub={fmt(Math.abs(gainPropBRLUsa), "BRL")}
+                value={fmt(gainPropUSDUsa, "USD")}
+                sub={fmt(gainPropBRLUsa, "BRL")}
                 subColor={gainPropUSDUsa >= 0 ? "green" : "red"}
                 color={gainPropUSDUsa >= 0 ? "green" : "red"}
                 icon={gainPropUSDUsa >= 0 ? TrendingUp : TrendingDown}
+                onClick={() => navigate("/properties")}
               />
             )}
           </div>
@@ -346,17 +385,35 @@ export default function Dashboard() {
 
       {/* Charts */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <DonutChart data={byTypeData} nameKey="name" valueKey="value" title="Alocação por Tipo de Ativo" />
+        <DonutChart
+          data={byTypeData}
+          nameKey="name"
+          valueKey="value"
+          title="Alocação por Tipo de Ativo"
+          onSliceClick={(d) => navigate(`/portfolio?type=${encodeURIComponent(d.type || "")}`)}
+        />
         <div>
-          <DonutChart data={byInstData} nameKey="name" valueKey="value" title="Alocação por Instituição" />
+          <DonutChart
+            data={byInstData}
+            nameKey="name"
+            valueKey="value"
+            title="Alocação por Instituição"
+            onSliceClick={goToPortfolioByInstitution}
+          />
           {!selected && summary.by_institution.some((d) => d.stale) && (
             <div className="mt-2 space-y-1 px-1">
               {summary.by_institution.filter((d) => d.stale).map((d, i) => {
                 const [, m, day] = (d.snapshot_date || "").split("-");
                 return (
-                  <div key={i} className="flex items-center gap-2 text-xs" style={{ color: "#dc2626" }}>
+                  <div
+                    key={i}
+                    className="flex items-center gap-2 text-xs cursor-pointer hover:underline"
+                    style={{ color: "#dc2626" }}
+                    title="Reimportar esta fonte"
+                    onClick={() => navigate("/upload")}
+                  >
                     <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: "#dc2626" }} />
-                    <span><strong>{d.name}</strong> — posição de {day}/{m}</span>
+                    <span><strong>{d.name}</strong> — posição de {day}/{m} · <span className="underline">reimportar →</span></span>
                   </div>
                 );
               })}
@@ -419,7 +476,12 @@ export default function Dashboard() {
               <p className="text-xs text-gray-400 uppercase tracking-wide mb-2">Top 10 Posições</p>
               <div className="space-y-1.5">
                 {riskData.top_positions.slice(0, 8).map((p, i) => (
-                  <div key={i} className="flex items-center gap-2">
+                  <div
+                    key={i}
+                    className={`flex items-center gap-2 ${p.asset_id ? "cursor-pointer hover:bg-gray-50 rounded" : ""}`}
+                    onClick={() => p.asset_id && navigate(`/asset/${p.asset_id}`)}
+                    title={p.asset_id ? "Ver detalhes do ativo" : undefined}
+                  >
                     <div className="flex-1 min-w-0">
                       <p className="text-xs text-gray-700 truncate">{p.name}</p>
                     </div>
@@ -486,7 +548,12 @@ export default function Dashboard() {
               <p className="text-xs text-gray-400 uppercase tracking-wide mb-2">Próximos vencimentos</p>
               <div className="space-y-1.5 max-h-40 overflow-y-auto">
                 {projData.events.slice(0, 8).map((ev, i) => (
-                  <div key={i} className="flex items-center justify-between text-xs">
+                  <div
+                    key={i}
+                    className={`flex items-center justify-between text-xs ${ev.asset_id ? "cursor-pointer hover:bg-gray-50 rounded" : ""}`}
+                    onClick={() => ev.asset_id && navigate(`/asset/${ev.asset_id}`)}
+                    title={ev.asset_id ? "Ver detalhes do ativo" : undefined}
+                  >
                     <span className="text-gray-500">{ev.month} · {ev.asset_name}</span>
                     <span className="font-mono font-medium text-green-600">{fmtUSD(ev.amount_usd)}</span>
                   </div>

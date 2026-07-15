@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import date, datetime
+from datetime import date as date_type  # p/ campos chamados "date" com default
 
 
 class InstitutionBase(BaseModel):
@@ -88,6 +89,13 @@ class PortfolioSummary(BaseModel):
     total_cost_basis_usd: float
     total_cost_basis_brl: float = 0.0
     total_unrealized_gain_usd: float
+    # Ganho calculado apenas sobre ativos com custo de aquisição registrado
+    total_gain_usd: float = 0.0
+    total_gain_brl: float = 0.0
+    gain_cost_basis_usd: float = 0.0
+    gain_cost_basis_brl: float = 0.0
+    usd_brl_rate: Optional[float] = None
+    rate_fallback: bool = False   # True = nenhuma cotação real disponível
     by_institution: List[dict]
     by_asset_type: List[dict]
     by_currency: List[dict]
@@ -148,6 +156,35 @@ class LoanSnapshotOut(LoanSnapshotCreate):
     model_config = {"from_attributes": True}
 
 
+class LoanPaymentCreate(BaseModel):
+    amount: float               # > 0; abate o saldo (piso 0)
+    date: date
+    notes: Optional[str] = None
+
+
+class LoanPayoffCreate(BaseModel):
+    date: date
+    notes: Optional[str] = None
+
+
+class LoanBalanceSet(BaseModel):
+    amount: float               # >= 0; define o saldo devedor nessa data
+    date: date
+    notes: Optional[str] = None
+
+
+class LoanEventOut(BaseModel):
+    id: int
+    loan_id: int
+    event_date: date
+    event_type: str
+    amount: Optional[float] = None
+    resulting_balance: float
+    notes: Optional[str] = None
+
+    model_config = {"from_attributes": True}
+
+
 class PropertyCreate(BaseModel):
     description: str
     address: Optional[str] = None
@@ -201,6 +238,45 @@ class ManualAssetHistoryOut(BaseModel):
     value: float
 
     model_config = {"from_attributes": True}
+
+
+class ManualAssetValueUpdate(BaseModel):
+    value: float
+    # NB: "date" com default shadowa o tipo no namespace da classe (PEP 649);
+    # usar o alias date_type evita o campo virar None-only.
+    date: Optional[date_type] = None
+
+
+class AssetNotesUpdate(BaseModel):
+    notes: Optional[str] = ""
+
+
+class AssetPurchaseDateUpdate(BaseModel):
+    purchase_date: Optional[str] = None
+
+
+class ExpectedIncomeUpdate(BaseModel):
+    monthly_dividends_expected: Optional[float] = None
+
+
+class ImportSourceUpdate(BaseModel):
+    custom_label: Optional[str] = None
+    visible: Optional[bool] = None
+    display_order: Optional[int] = None
+
+
+class SourcesReorder(BaseModel):
+    ordered_ids: List[int] = []
+
+
+class AppSettingUpdate(BaseModel):
+    value: str = ""
+
+
+class ReportGenerateRequest(BaseModel):
+    backfill_all: bool = False
+    type: Optional[str] = None          # weekly | monthly
+    period_start: Optional[date] = None
 
 
 class RentalIncomeUpsert(BaseModel):

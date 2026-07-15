@@ -1,13 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from datetime import date, datetime
-from typing import List, Optional
+from datetime import date
+from typing import Optional
 
 from database import get_db
 from models import Asset, Institution, Snapshot, ManualAssetHistory
 from parsers.base import ParsedRecord
 from routers.upload import _upsert_snapshot, _upsert_import_source
+from schemas import ManualAssetCreate, ManualAssetValueUpdate
 
 router = APIRouter(prefix="/manual-assets", tags=["manual-assets"])
 
@@ -40,15 +40,15 @@ def _make_snapshot_rec(asset: Asset, value: float, snapshot_date: date) -> Parse
 
 
 @router.post("/", status_code=201)
-def create_manual_asset(payload: dict, db: Session = Depends(get_db)):
-    name          = str(payload.get("name", "")).strip()
-    asset_type    = str(payload.get("asset_type", "other"))
-    currency      = str(payload.get("currency", "BRL"))
-    notes         = payload.get("notes")
-    inst_name     = str(payload.get("institution_name") or _MANUAL_INST_NAME).strip()
-    quantity      = payload.get("quantity")
-    current_value = float(payload.get("current_value", 0))
-    owner         = payload.get("owner")
+def create_manual_asset(payload: ManualAssetCreate, db: Session = Depends(get_db)):
+    name          = payload.name.strip()
+    asset_type    = payload.asset_type
+    currency      = payload.currency
+    notes         = payload.notes
+    inst_name     = (payload.institution_name or _MANUAL_INST_NAME).strip()
+    quantity      = payload.quantity
+    current_value = payload.current_value
+    owner         = payload.owner
 
     if not name:
         raise HTTPException(status_code=422, detail="name é obrigatório")
@@ -133,20 +133,18 @@ def get_history(asset_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/{asset_id}/update-value")
-def update_value(asset_id: int, payload: dict, db: Session = Depends(get_db)):
+def update_value(asset_id: int, payload: ManualAssetValueUpdate, db: Session = Depends(get_db)):
     asset = db.query(Asset).filter(Asset.id == asset_id, Asset.source == "manual").first()
     if not asset:
         raise HTTPException(status_code=404, detail="Ativo manual não encontrado")
 
-    value = float(payload.get("value", 0))
+    value = payload.value
     if value <= 0:
         raise HTTPException(status_code=422, detail="value deve ser > 0")
 
-    date_str = payload.get("date")
-    try:
-        entry_date = datetime.strptime(date_str, "%Y-%m-%d").date() if date_str else date.today()
-    except ValueError:
-        entry_date = date.today()
+    entry_date = payload.date or date.today()
+    if entry_date > date.today():
+        raise HTTPException(status_code=422, detail="Data não pode ser futura")
 
     # Upsert history record (INSERT OR REPLACE via SQLAlchemy)
     existing = (

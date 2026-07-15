@@ -22,7 +22,12 @@ def get_maturity_alerts(db: Session = Depends(get_db)):
             Snapshot.asset_id,
             func.max(Snapshot.snapshot_date).label("max_date"),
         )
-        .filter(Snapshot.maturity_date >= today, Snapshot.maturity_date <= cutoff)
+        .join(Asset, Asset.id == Snapshot.asset_id)
+        .filter(
+            Snapshot.maturity_date >= today,
+            Snapshot.maturity_date <= cutoff,
+            Asset.is_active.isnot(False),
+        )
         .group_by(Snapshot.asset_id)
         .subquery()
     )
@@ -157,33 +162,23 @@ def get_drop_alerts(
     monitored_raw = asset_types if asset_types is not None else _get_app_setting(db, "alert_monitored_classes", "equity,fixed_income,fund,cash")
     monitored = set(c.strip() for c in monitored_raw.split(",") if c.strip())
 
-    # Two most recent distinct snapshot dates across all assets
-    dates_desc = [
-        r[0]
-        for r in db.query(distinct(Snapshot.snapshot_date))
-        .order_by(Snapshot.snapshot_date.desc())
-        .limit(2)
+    # Comparação POR ATIVO: os dois snapshots mais recentes de cada ativo.
+    # Fontes importadas em datas diferentes (ex.: manual hoje + XP ontem)
+    # não zeram a interseção como acontecia com duas datas globais.
+    all_snaps = (
+        db.query(Snapshot)
+        .options(joinedload(Snapshot.asset).joinedload(Asset.institution))
+        .join(Asset, Asset.id == Snapshot.asset_id)
+        .filter(Asset.is_active.isnot(False))
+        .order_by(Snapshot.asset_id, Snapshot.snapshot_date.desc(), Snapshot.id.desc())
         .all()
-    ]
-    if len(dates_desc) < 2:
-        return {"count": 0, "items": [], "date_before": None, "date_after": None}
+    )
 
-    date_after, date_before = dates_desc[0], dates_desc[1]
-
-    def _load_snaps(d):
-        return {
-            s.asset_id: s
-            for s in (
-                db.query(Snapshot)
-                .options(joinedload(Snapshot.asset).joinedload(Asset.institution))
-                .filter(Snapshot.snapshot_date == d)
-                .all()
-            )
-        }
-
-    snaps_after  = _load_snaps(date_after)
-    snaps_before = _load_snaps(date_before)
-    common_ids   = set(snaps_after.keys()) & set(snaps_before.keys())
+    latest_two: dict = {}  # asset_id → [snap_mais_recente, snap_anterior]
+    for s in all_snaps:
+        pair = latest_two.setdefault(s.asset_id, [])
+        if len(pair) < 2:
+            pair.append(s)
 
     def _eff(s):
         if s.asset and s.asset.currency == "BRL" and s.tax_net is not None:
@@ -191,10 +186,12 @@ def get_drop_alerts(
         return s.market_value or 0.0
 
     items = []
-    for asset_id in common_ids:
-        s_after  = snaps_after[asset_id]
-        s_before = snaps_before[asset_id]
-        asset    = s_after.asset
+    global_after = global_before = None
+    for asset_id, pair in latest_two.items():
+        if len(pair) < 2:
+            continue
+        s_after, s_before = pair[0], pair[1]
+        asset = s_after.asset
         if not asset or asset.asset_type not in monitored:
             continue
 
@@ -202,6 +199,11 @@ def get_drop_alerts(
         mv_after  = _eff(s_after)
         if mv_before <= 0:
             continue
+
+        if global_after is None or s_after.snapshot_date > global_after:
+            global_after = s_after.snapshot_date
+        if global_before is None or s_before.snapshot_date < global_before:
+            global_before = s_before.snapshot_date
 
         drop_pct = (mv_before - mv_after) / mv_before * 100
 
@@ -218,16 +220,16 @@ def get_drop_alerts(
                 "value_before":    round(mv_before, 2),
                 "value_after":     round(mv_after, 2),
                 "drop_pct":        round(drop_pct, 2),
-                "date_before":     date_before.isoformat(),
-                "date_after":      date_after.isoformat(),
+                "date_before":     s_before.snapshot_date.isoformat(),
+                "date_after":      s_after.snapshot_date.isoformat(),
                 "anomaly_type":    "fixed_income_drop" if fi_anomaly and drop_pct < threshold else None,
             })
 
     items.sort(key=lambda x: -x["drop_pct"])
     return {
         "count":       len(items),
-        "date_before": date_before.isoformat(),
-        "date_after":  date_after.isoformat(),
+        "date_before": global_before.isoformat() if global_before else None,
+        "date_after":  global_after.isoformat() if global_after else None,
         "threshold_pct": threshold,
         "items":       items,
     }

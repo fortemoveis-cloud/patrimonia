@@ -9,15 +9,18 @@ from typing import Optional
 from io import BytesIO
 from collections import defaultdict
 
+import fx
 from database import get_db
 from models import Snapshot, Asset, Institution, ExchangeRate, Loan, LoanSnapshot, Property, PropertyValuation, Report
+from routers.loans import _current_balance
+from schemas import ReportGenerateRequest
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
 
 def _rate(db):
-    r = db.query(ExchangeRate).order_by(ExchangeRate.date.desc()).first()
-    return r.usd_brl if r else 5.0
+    rate, _ = fx.get_latest_rate(db)
+    return rate
 
 
 def _to_usd(v, currency, rate):
@@ -73,10 +76,14 @@ def _all_closed_periods(earliest: date, today: date):
 # ── Report computation ─────────────────────────────────────────────────────────
 
 def _compute_report_payload(db, period_start: date, period_end: date) -> dict:
-    rate_row = db.query(ExchangeRate).filter(ExchangeRate.date <= period_end).order_by(ExchangeRate.date.desc()).first()
-    usd_brl  = rate_row.usd_brl if rate_row else 5.0
+    usd_brl, _ = fx.get_rate_for_date(db, period_end)
 
-    assets       = db.query(Asset).options(joinedload(Asset.institution)).all()
+    assets = (
+        db.query(Asset)
+        .options(joinedload(Asset.institution))
+        .filter(Asset.is_active.isnot(False))
+        .all()
+    )
     assets_data  = []
     total_end    = 0.0
     total_start  = 0.0
@@ -168,7 +175,8 @@ def export_pdf(
     snaps = (
         db.query(Snapshot)
         .options(joinedload(Snapshot.asset).joinedload(Asset.institution))
-        .filter(Snapshot.snapshot_date == target)
+        .join(Asset, Asset.id == Snapshot.asset_id)
+        .filter(Snapshot.snapshot_date == target, Asset.is_active.isnot(False))
         .all()
     )
 
@@ -194,8 +202,9 @@ def export_pdf(
     loan_total_usd = loan_total_brl = 0.0
     loan_rows = []
     for loan in loans:
-        snap = db.query(LoanSnapshot).filter(LoanSnapshot.loan_id == loan.id).order_by(LoanSnapshot.snapshot_date.desc()).first()
-        bal = (snap.outstanding_balance if snap else None) or loan.original_amount or 0.0
+        # Saldo via eventos (mesma fonte do dashboard); saldo 0 (quitado) é
+        # respeitado — nunca cair no original_amount por causa de falsy.
+        bal = _current_balance(db, loan.id, loan.original_amount or 0.0)
         bal_usd = bal / usd_brl if loan.currency == "BRL" else bal
         bal_brl = bal * usd_brl if loan.currency == "USD" else bal
         loan_total_usd += bal_usd
@@ -208,7 +217,10 @@ def export_pdf(
     prop_rows = []
     for prop in props:
         val = db.query(PropertyValuation).filter(PropertyValuation.property_id == prop.id).order_by(PropertyValuation.valuation_date.desc()).first()
-        cur_val = (val.current_value_brl if val else None) or prop.purchase_price_brl or 0.0
+        if val is not None and val.current_value_brl is not None:
+            cur_val = val.current_value_brl
+        else:
+            cur_val = prop.purchase_price_brl or 0.0
         prop_total_brl += cur_val
         prop_total_usd += cur_val / usd_brl
         gain = cur_val - (prop.purchase_price_brl or 0)
@@ -396,16 +408,14 @@ def list_reports(db: Session = Depends(get_db)):
 
 
 @router.post("/generate")
-def generate_reports(payload: dict, db: Session = Depends(get_db)):
-    if payload.get("backfill_all"):
+def generate_reports(payload: ReportGenerateRequest, db: Session = Depends(get_db)):
+    if payload.backfill_all:
         n = _do_backfill(db)
         return {"generated": n, "skipped": 0}
-    rtype  = payload.get("type")
-    ps_str = payload.get("period_start")
-    if not rtype or not ps_str:
+    rtype = payload.type
+    if not rtype or not payload.period_start:
         raise HTTPException(status_code=400, detail="Forneça backfill_all ou type+period_start")
-    ps = date.fromisoformat(ps_str)
-    ps, pe = _iso_week_bounds(ps) if rtype == "weekly" else _month_bounds(ps)
+    ps, pe = _iso_week_bounds(payload.period_start) if rtype == "weekly" else _month_bounds(payload.period_start)
     created = _generate_period_report(db, rtype, ps, pe)
     return {"generated": 1 if created else 0, "skipped": 0 if created else 1}
 

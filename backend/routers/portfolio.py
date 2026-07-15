@@ -1,25 +1,41 @@
 import logging
 
+import bisect
+
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import func, distinct
+from sqlalchemy import func, distinct, or_
 from datetime import date, timedelta
 from typing import List, Optional
 from collections import defaultdict
 import httpx
 
+import fx
 from database import get_db
 from models import Snapshot, Asset, Institution, ExchangeRate, Dividend, ImportSource
-from schemas import SnapshotOut, PortfolioSummary, PortfolioHistory, DividendCreate
+from schemas import (
+    SnapshotOut, PortfolioSummary, PortfolioHistory, DividendCreate,
+    AssetNotesUpdate, AssetPurchaseDateUpdate, ExpectedIncomeUpdate,
+)
 
 AWESOME_URL = "https://economia.awesomeapi.com.br/json/daily/USD-BRL/{days}"
 
 router = APIRouter(prefix="/portfolio", tags=["portfolio"])
 
+_ensure_log = logging.getLogger("portfolio")
+
+# Ativos arquivados saem de todos os cálculos. NULL conta como ativo
+# (linhas anteriores à migração da coluna is_active).
+_ACTIVE = Asset.is_active.isnot(False)
+
+
+def _not_manual():
+    return or_(Asset.source.is_(None), Asset.source != "manual")
+
 
 def _get_rate(db: Session, snap_date: date) -> float:
-    rate = db.query(ExchangeRate).filter(ExchangeRate.date <= snap_date).order_by(ExchangeRate.date.desc()).first()
-    return rate.usd_brl if rate else 5.0
+    rate, _ = fx.get_rate_for_date(db, snap_date)
+    return rate
 
 
 def _ensure_rates(db: Session, dates: list) -> None:
@@ -46,8 +62,57 @@ def _ensure_rates(db: Session, dates: list) -> None:
             if not db.query(ExchangeRate).filter(ExchangeRate.date == d).first():
                 db.add(ExchangeRate(date=d, usd_brl=bid, source="awesomeapi"))
         db.commit()
-    except Exception:
-        pass
+    except Exception as exc:
+        _ensure_log.warning("Falha ao buscar cotações históricas: %s", exc)
+
+
+def _carry_forward_snaps(db: Session) -> List[Snapshot]:
+    """Snapshots vigentes para a visão 'Atual'.
+
+    Importados: última data POR FONTE (instituição + conta) — uma fonte
+    atualizada não esconde as demais. Manuais: última data POR ATIVO — todos
+    compartilham a fonte 'Manual', e atualizar um ativo não pode sumir com os
+    outros que foram atualizados em datas diferentes.
+    """
+    source_max_sq = (
+        db.query(
+            Asset.institution_id,
+            func.coalesce(Asset.account_number, "").label("account_number"),
+            func.max(Snapshot.snapshot_date).label("max_snap_date"),
+        )
+        .join(Snapshot, Snapshot.asset_id == Asset.id)
+        .filter(_not_manual(), _ACTIVE)
+        .group_by(Asset.institution_id, func.coalesce(Asset.account_number, ""))
+        .subquery()
+    )
+    imported = (
+        db.query(Snapshot)
+        .options(joinedload(Snapshot.asset).joinedload(Asset.institution))
+        .join(Asset, Asset.id == Snapshot.asset_id)
+        .join(
+            source_max_sq,
+            (Asset.institution_id == source_max_sq.c.institution_id)
+            & (func.coalesce(Asset.account_number, "") == source_max_sq.c.account_number)
+            & (Snapshot.snapshot_date == source_max_sq.c.max_snap_date),
+        )
+        .filter(_not_manual(), _ACTIVE)
+        .all()
+    )
+    manual_max_sq = (
+        db.query(Snapshot.asset_id.label("aid"), func.max(Snapshot.snapshot_date).label("md"))
+        .join(Asset, Asset.id == Snapshot.asset_id)
+        .filter(Asset.source == "manual", _ACTIVE)
+        .group_by(Snapshot.asset_id)
+        .subquery()
+    )
+    manual = (
+        db.query(Snapshot)
+        .options(joinedload(Snapshot.asset).joinedload(Asset.institution))
+        .join(manual_max_sq, (Snapshot.asset_id == manual_max_sq.c.aid)
+              & (Snapshot.snapshot_date == manual_max_sq.c.md))
+        .all()
+    )
+    return imported + manual
 
 
 def _to_usd(value: Optional[float], currency: str, rate: float) -> float:
@@ -107,28 +172,7 @@ def get_summary(
     overall_max = None
 
     if snapshot_date is None:
-        source_max_sq = (
-            db.query(
-                Asset.institution_id,
-                func.coalesce(Asset.account_number, "").label("account_number"),
-                func.max(Snapshot.snapshot_date).label("max_snap_date"),
-            )
-            .join(Snapshot, Snapshot.asset_id == Asset.id)
-            .group_by(Asset.institution_id, func.coalesce(Asset.account_number, ""))
-            .subquery()
-        )
-        snaps = (
-            db.query(Snapshot)
-            .options(joinedload(Snapshot.asset).joinedload(Asset.institution))
-            .join(Asset, Asset.id == Snapshot.asset_id)
-            .join(
-                source_max_sq,
-                (Asset.institution_id == source_max_sq.c.institution_id)
-                & (func.coalesce(Asset.account_number, "") == source_max_sq.c.account_number)
-                & (Snapshot.snapshot_date == source_max_sq.c.max_snap_date),
-            )
-            .all()
-        )
+        snaps = _carry_forward_snaps(db)
         pdf_max_dates = []  # max dates from pdf_import sources only (for staleness comparison)
         for s in snaps:
             if s.asset:
@@ -140,23 +184,30 @@ def get_summary(
         # overall_max computed from pdf_import sources only so that manual
         # asset updates don't make all import sources appear stale
         overall_max = max(pdf_max_dates) if pdf_max_dates else (max(source_dates.values()) if source_dates else None)
-        target_date = overall_max or available_dates[0]
+        # Visão "Atual": cotação mais recente, a mesma usada por empréstimos e
+        # imóveis — assim os cards do dashboard fecham entre si.
+        rate, rate_fallback = fx.get_latest_rate(db)
     else:
-        target_date = snapshot_date
         snaps = (
             db.query(Snapshot)
             .options(joinedload(Snapshot.asset).joinedload(Asset.institution))
-            .filter(Snapshot.snapshot_date == target_date)
+            .join(Asset, Asset.id == Snapshot.asset_id)
+            .filter(Snapshot.snapshot_date == snapshot_date, _ACTIVE)
             .all()
         )
-
-    rate = _get_rate(db, target_date)
+        rate, rate_fallback = fx.get_rate_for_date(db, snapshot_date)
 
     total_mv_usd = 0.0
     total_mv_brl = 0.0
     total_cb_usd = 0.0
     total_cb_brl = 0.0
     total_ug_usd = 0.0
+    # Ganho calculado só sobre ativos COM custo de aquisição — ativos manuais
+    # não têm cost_basis e entrariam como 100% de "ganho" fantasma.
+    total_gain_usd = 0.0
+    total_gain_brl = 0.0
+    gain_cb_usd = 0.0
+    gain_cb_brl = 0.0
     by_inst: dict = {}  # label → {market_value_usd, market_value_brl, _order, snapshot_date, stale}
     by_type: dict = defaultdict(lambda: {"market_value_usd": 0.0, "market_value_brl": 0.0})
     by_currency: dict = defaultdict(lambda: {
@@ -182,6 +233,12 @@ def get_summary(
         total_cb_brl += cb_brl
         total_ug_usd += ug_usd
 
+        if s.cost_basis is not None and s.cost_basis > 0:
+            total_gain_usd += mv_usd - cb_usd
+            total_gain_brl += mv_brl - cb_brl
+            gain_cb_usd += cb_usd
+            gain_cb_brl += cb_brl
+
         if s.asset and s.asset.institution:
             inst_id = s.asset.institution_id
             acct = s.asset.account_number or ""
@@ -203,6 +260,11 @@ def get_summary(
                 by_inst[label] = {
                     "market_value_usd": 0.0, "market_value_brl": 0.0,
                     "_order": order, "snapshot_date": src_date, "stale": src_stale,
+                    # nome cru da instituição (não o label) — usado pela
+                    # Carteira para filtrar ao clicar no gráfico do dashboard
+                    "institution_name": s.asset.institution.name if s.asset and s.asset.institution else None,
+                    "institution_id": inst_id if s.asset else None,
+                    "account_number": acct if s.asset else None,
                 }
             by_inst[label]["market_value_usd"] += mv_usd
             by_inst[label]["market_value_brl"] += mv_brl
@@ -224,6 +286,9 @@ def get_summary(
             "market_value_brl": v["market_value_brl"],
             "snapshot_date":    v["snapshot_date"].isoformat() if v["snapshot_date"] else None,
             "stale":            v["stale"],
+            "institution_name": v["institution_name"],
+            "institution_id":   v["institution_id"],
+            "account_number":   v["account_number"],
         }
         for k, v in sorted_inst
     ]
@@ -235,6 +300,12 @@ def get_summary(
         total_cost_basis_usd=round(total_cb_usd, 2),
         total_cost_basis_brl=round(total_cb_brl, 2),
         total_unrealized_gain_usd=round(total_ug_usd, 2),
+        total_gain_usd=round(total_gain_usd, 2),
+        total_gain_brl=round(total_gain_brl, 2),
+        gain_cost_basis_usd=round(gain_cb_usd, 2),
+        gain_cost_basis_brl=round(gain_cb_brl, 2),
+        usd_brl_rate=round(rate, 4),
+        rate_fallback=rate_fallback,
         by_institution=by_inst_out,
         by_asset_type=[{"type": k, **v} for k, v in by_type.items()],
         by_currency=[{"currency": k, **v} for k, v in by_currency.items()],
@@ -317,10 +388,16 @@ def get_history(
             asset_currency=currency,
         )
 
-    # ── Full portfolio ─────────────────────────────────────────────────────────
+    # ── Full portfolio (carry-forward por fonte) ──────────────────────────────
+    # Em cada data do gráfico, cada fonte contribui com sua última importação
+    # ATÉ aquela data — sem isso o total "despenca" em datas em que só uma
+    # fonte foi importada. Manuais são carregados por ativo (mesma regra do
+    # /summary).
     all_snaps = (
         db.query(Snapshot)
         .options(joinedload(Snapshot.asset).joinedload(Asset.institution))
+        .join(Asset, Asset.id == Snapshot.asset_id)
+        .filter(_ACTIVE)
         .all()
     )
 
@@ -330,40 +407,54 @@ def get_history(
         _hist_src_map = {(x.institution_id, x.account_number): x
                          for x in db.query(ImportSource).all()}
 
-    dates_set = set(dates)
+    # Agrupa snapshots: importados por (instituição, conta), manuais por ativo
+    src_snaps: dict = defaultdict(lambda: defaultdict(list))  # key → snap_date → [snaps]
+    for s in all_snaps:
+        a = s.asset
+        if a and a.source == "manual":
+            key = ("manual", s.asset_id)
+        elif a:
+            key = ("src", a.institution_id, a.account_number or "")
+        else:
+            key = ("orphan", s.asset_id)
+        src_snaps[key][s.snapshot_date].append(s)
+    key_dates = {k: sorted(v.keys()) for k, v in src_snaps.items()}
+
     usd_by_date: dict = {d: 0.0 for d in dates}
     brl_by_date: dict = {d: 0.0 for d in dates}
     series_acc:  dict = defaultdict(lambda: {d: 0.0 for d in dates})
 
-    for s in all_snaps:
-        d = s.snapshot_date
-        if d not in dates_set:
-            continue
+    for d in dates:
         rate = rate_cache[d]
-        currency = s.asset.currency if s.asset else "USD"
-        mv = _effective_mv(s)
+        for key, kdates in key_dates.items():
+            idx = bisect.bisect_right(kdates, d) - 1
+            if idx < 0:
+                continue  # fonte ainda não existia nessa data
+            for s in src_snaps[key][kdates[idx]]:
+                currency = s.asset.currency if s.asset else "USD"
+                mv = _effective_mv(s)
 
-        if currency == "BRL":
-            brl_by_date[d] += mv
-            mv_usd = mv / rate
-            usd_by_date[d] += mv_usd
-        else:
-            mv_usd = mv
-            usd_by_date[d] += mv
-            brl_by_date[d] += mv * rate
-
-        if group_by:
-            if group_by == "institution":
-                if s.asset and s.asset.institution:
-                    src = _hist_src_map.get((s.asset.institution_id, s.asset.account_number or ""))
-                    key = (src.custom_label or src.default_label) if src else s.asset.institution.name
+                if currency == "BRL":
+                    brl_by_date[d] += mv
+                    mv_usd = mv / rate
+                    usd_by_date[d] += mv_usd
                 else:
-                    key = "Unknown"
-            elif group_by == "asset_type":
-                key = s.asset.asset_type if s.asset else "other"
-            else:
-                key = currency
-            series_acc[key][d] += mv_usd
+                    mv_usd = mv
+                    usd_by_date[d] += mv
+                    brl_by_date[d] += mv * rate
+
+                if group_by:
+                    if group_by == "institution":
+                        if s.asset and s.asset.institution:
+                            src = _hist_src_map.get((s.asset.institution_id, s.asset.account_number or ""))
+                            gkey = (src.custom_label or src.default_label) if src else s.asset.institution.name
+                        else:
+                            gkey = "Unknown"
+                    elif group_by == "asset_type":
+                        gkey = s.asset.asset_type if s.asset else "other"
+                    else:
+                        gkey = currency
+                    series_acc[gkey][d] += mv_usd
 
     result_series = (
         [{"name": k, "data": [round(v[d], 2) for d in dates]} for k, v in series_acc.items()]
@@ -388,16 +479,21 @@ def get_snapshots(
     limit: int = 200,
     db: Session = Depends(get_db),
 ):
-    q = db.query(Snapshot).options(joinedload(Snapshot.asset).joinedload(Asset.institution))
+    q = (
+        db.query(Snapshot)
+        .options(joinedload(Snapshot.asset).joinedload(Asset.institution))
+        .join(Asset, Asset.id == Snapshot.asset_id)
+        .filter(_ACTIVE)
+    )
 
     if snapshot_date:
         q = q.filter(Snapshot.snapshot_date == snapshot_date)
 
     if institution:
-        q = q.join(Asset).join(Institution).filter(Institution.name.ilike(f"%{institution}%"))
+        q = q.join(Institution).filter(Institution.name.ilike(f"%{institution}%"))
 
     if asset_type:
-        q = q.join(Asset).filter(Asset.asset_type == asset_type)
+        q = q.filter(Asset.asset_type == asset_type)
 
     snaps = q.order_by(Snapshot.snapshot_date.desc()).offset(skip).limit(limit).all()
     return snaps
@@ -525,28 +621,30 @@ def get_asset(asset_id: int, db: Session = Depends(get_db)):
 
 
 @router.put("/assets/{asset_id}/notes")
-def update_asset_notes(asset_id: int, body: dict, db: Session = Depends(get_db)):
+def update_asset_notes(asset_id: int, body: AssetNotesUpdate, db: Session = Depends(get_db)):
     asset = db.query(Asset).filter(Asset.id == asset_id).first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
-    asset.notes      = body.get("notes", "")
+    asset.notes      = body.notes or ""
     asset.user_edited = True
     db.commit()
     return {"ok": True, "notes": asset.notes}
 
 
 @router.put("/assets/{asset_id}/purchase-date")
-def update_asset_purchase_date(asset_id: int, body: dict, db: Session = Depends(get_db)):
+def update_asset_purchase_date(asset_id: int, body: AssetPurchaseDateUpdate, db: Session = Depends(get_db)):
     from datetime import datetime as dt_
     asset = db.query(Asset).filter(Asset.id == asset_id).first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
-    val = body.get("purchase_date")
+    val = body.purchase_date
     if val:
         try:
             pd = dt_.strptime(str(val), "%Y-%m-%d").date()
         except ValueError:
             raise HTTPException(status_code=400, detail="Formato inválido. Use YYYY-MM-DD")
+        if pd > date.today():
+            raise HTTPException(status_code=422, detail="Data de aplicação não pode ser futura")
         asset.purchase_date = pd
         # Propagate to all snapshots that have no purchase_date
         db.query(Snapshot).filter(
@@ -560,12 +658,11 @@ def update_asset_purchase_date(asset_id: int, body: dict, db: Session = Depends(
 
 
 @router.put("/assets/{asset_id}/expected-income")
-def update_expected_income(asset_id: int, body: dict, db: Session = Depends(get_db)):
+def update_expected_income(asset_id: int, body: ExpectedIncomeUpdate, db: Session = Depends(get_db)):
     asset = db.query(Asset).filter(Asset.id == asset_id).first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
-    val = body.get("monthly_dividends_expected")
-    asset.monthly_dividends_expected = float(val) if val is not None else None
+    asset.monthly_dividends_expected = body.monthly_dividends_expected
     asset.user_edited = True
     db.commit()
     return {"ok": True, "monthly_dividends_expected": asset.monthly_dividends_expected}
@@ -679,46 +776,26 @@ def get_risk_analysis(
     db: Session = Depends(get_db),
 ):
     if snapshot_date is None:
-        # Carry-forward: latest snapshot per source (institution + account), same logic as get_summary.
-        # Avoids the global max-date trap where a newer manual-asset snapshot can hide all imported ones.
-        source_max_sq = (
-            db.query(
-                Asset.institution_id,
-                func.coalesce(Asset.account_number, "").label("account_number"),
-                func.max(Snapshot.snapshot_date).label("max_snap_date"),
-            )
-            .join(Snapshot, Snapshot.asset_id == Asset.id)
-            .group_by(Asset.institution_id, func.coalesce(Asset.account_number, ""))
-            .subquery()
-        )
+        # Carry-forward: mesma seleção de snapshots do get_summary
+        # (por fonte para importados, por ativo para manuais).
+        snaps = _carry_forward_snaps(db)
+        rate, _ = fx.get_latest_rate(db)
+    else:
         snaps = (
             db.query(Snapshot)
             .options(joinedload(Snapshot.asset).joinedload(Asset.institution))
             .join(Asset, Asset.id == Snapshot.asset_id)
-            .join(
-                source_max_sq,
-                (Asset.institution_id == source_max_sq.c.institution_id)
-                & (func.coalesce(Asset.account_number, "") == source_max_sq.c.account_number)
-                & (Snapshot.snapshot_date == source_max_sq.c.max_snap_date),
-            )
+            .filter(Snapshot.snapshot_date == snapshot_date, _ACTIVE)
             .all()
         )
-        # Exchange rate: use max date from non-manual sources (same as get_summary)
-        pdf_dates = [s.snapshot_date for s in snaps if s.asset and s.asset.source != "manual"]
-        target = max(pdf_dates) if pdf_dates else date.today()
-    else:
-        target = snapshot_date
-        snaps = (
-            db.query(Snapshot)
-            .options(joinedload(Snapshot.asset).joinedload(Asset.institution))
-            .filter(Snapshot.snapshot_date == target)
-            .all()
-        )
+        rate, _ = fx.get_rate_for_date(db, snapshot_date)
 
     if not snaps:
         return {"total_usd": 0, "alerts": [], "by_institution": [], "by_type": [], "by_currency": [], "top_positions": []}
 
-    rate = _get_rate(db, target)
+    # Mesmos labels e visibilidade do /summary, para os gráficos baterem
+    all_sources = db.query(ImportSource).all()
+    src_map = {(x.institution_id, x.account_number): x for x in all_sources}
 
     total_usd = 0.0
     by_inst: dict = defaultdict(float)
@@ -730,12 +807,25 @@ def get_risk_analysis(
         mv  = _effective_mv(s)
         cur = s.asset.currency if s.asset else "USD"
         mv_usd = mv / rate if cur == "BRL" else mv
+
+        if s.asset and s.asset.institution:
+            src = src_map.get((s.asset.institution_id, s.asset.account_number or ""))
+            if src and not src.visible:
+                continue
+            inst = (src.custom_label or src.default_label) if src else s.asset.institution.name
+        else:
+            inst = "Unknown"
+
         total_usd += mv_usd
-        inst = s.asset.institution.name if s.asset and s.asset.institution else "Unknown"
         by_inst[inst] += mv_usd
         by_type[s.asset.asset_type if s.asset else "other"] += mv_usd
         by_curr[cur] += mv_usd
-        positions.append({"name": s.asset.name if s.asset else "—", "institution": inst, "value_usd": mv_usd})
+        positions.append({
+            "asset_id": s.asset_id,
+            "name": s.asset.name if s.asset else "—",
+            "institution": inst,
+            "value_usd": mv_usd,
+        })
 
     if total_usd == 0:
         return {"total_usd": 0, "alerts": [], "by_institution": [], "by_type": [], "by_currency": [], "top_positions": []}
@@ -768,9 +858,11 @@ def get_income_projections(db: Session = Depends(get_db)):
     today = date.today()
     rate  = _get_rate(db, today)
 
-    # Latest snapshot per asset
+    # Latest snapshot per asset (só ativos não arquivados)
     subq = (
         db.query(Snapshot.asset_id, func.max(Snapshot.snapshot_date).label("md"))
+        .join(Asset, Asset.id == Snapshot.asset_id)
+        .filter(_ACTIVE)
         .group_by(Snapshot.asset_id)
         .subquery()
     )
@@ -820,6 +912,7 @@ def get_income_projections(db: Session = Depends(get_db)):
                 maturity_m[key] += mv_usd
                 events.append({
                     "month":         key,
+                    "asset_id":      s.asset_id,
                     "asset_name":    s.asset.name if s.asset else "—",
                     "institution":   s.asset.institution.name if s.asset and s.asset.institution else "—",
                     "currency":      cur,
@@ -854,21 +947,29 @@ def get_cdi_comparison(
 ):
     from models import CdiRate
 
-    target = snapshot_date or db.query(func.max(Snapshot.snapshot_date)).scalar()
-    if not target:
+    if snapshot_date is not None:
+        snaps = (
+            db.query(Snapshot)
+            .options(joinedload(Snapshot.asset))
+            .join(Asset, Asset.id == Snapshot.asset_id)
+            .filter(Snapshot.snapshot_date == snapshot_date, _ACTIVE)
+            .all()
+        )
+    else:
+        # Carry-forward: mesma seleção do /summary — uma atualização de ativo
+        # manual não pode esconder os importados do comparativo CDI.
+        snaps = _carry_forward_snaps(db)
+
+    if not snaps:
         return []
 
     _ensure_cdi_cache(db)
 
-    snaps = (
-        db.query(Snapshot)
-        .options(joinedload(Snapshot.asset))
-        .filter(Snapshot.snapshot_date == target)
-        .all()
-    )
-
     result = []
     for s in snaps:
+        # Fim do período CDI: a data do próprio snapshot (fontes podem estar
+        # em datas diferentes no modo carry-forward)
+        target = snapshot_date or s.snapshot_date
         if not s.asset or s.asset.currency != "BRL":
             continue
         if not s.cost_basis or s.cost_basis <= 0 or (s.market_value is None and s.tax_net is None):
@@ -966,5 +1067,5 @@ def _ensure_cdi_cache(db: Session):
             except Exception:
                 continue
         db.commit()
-    except Exception:
-        pass
+    except Exception as exc:
+        _cdi_log.warning("Falha ao atualizar cache do CDI (BCB): %s", exc)

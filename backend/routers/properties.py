@@ -17,6 +17,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+import fx
 from database import get_db
 from models import CdiRate, ExchangeRate, Loan, Property, PropertyPhoto, PropertyValuation, PriceReference, PropertyRentalIncome
 from schemas import PriceReferenceCreate, PropertyCreate, PropertyValuationCreate, RentalIncomeUpsert
@@ -30,8 +31,8 @@ UPLOAD_DIR = config.UPLOADS_DIR / "properties"
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _latest_rate(db: Session) -> float:
-    rate = db.query(ExchangeRate).order_by(ExchangeRate.date.desc()).first()
-    return rate.usd_brl if rate else 5.0
+    rate, _ = fx.get_latest_rate(db)
+    return rate
 
 
 def _latest_valuation(db: Session, property_id: int) -> Optional[PropertyValuation]:

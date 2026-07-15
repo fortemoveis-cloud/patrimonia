@@ -23,7 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from database import init_db
 from routers import upload, portfolio, exchange, loans, properties, alerts, reports, backup, logs, chat, manual_assets, settings
 
-app = FastAPI(title="PatrimonIA", version="1.0.0")
+app = FastAPI(title="PatrimonIA", version="1.2.0")
 
 app.add_middleware(
     CORSMiddleware,

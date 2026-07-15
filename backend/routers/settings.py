@@ -4,6 +4,7 @@ from typing import List, Optional
 
 from database import get_db, _slugify, _make_default_label, _get_app_setting
 from models import ImportSource, Institution, AppSettings
+from schemas import ImportSourceUpdate, SourcesReorder, AppSettingUpdate
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -37,20 +38,22 @@ def list_sources(db: Session = Depends(get_db)):
 
 
 @router.patch("/sources/{source_id}")
-def update_source(source_id: int, payload: dict, db: Session = Depends(get_db)):
+def update_source(source_id: int, payload: ImportSourceUpdate, db: Session = Depends(get_db)):
     src = db.query(ImportSource).filter(ImportSource.id == source_id).first()
     if not src:
         raise HTTPException(status_code=404, detail="Fonte não encontrada")
 
-    if "custom_label" in payload:
-        v = payload["custom_label"]
+    data = payload.model_dump(exclude_unset=True)
+
+    if "custom_label" in data:
+        v = data["custom_label"]
         src.custom_label = str(v).strip() if v not in (None, "", "null") else None
 
-    if "visible" in payload:
-        src.visible = bool(payload["visible"])
+    if "visible" in data and data["visible"] is not None:
+        src.visible = bool(data["visible"])
 
-    if "display_order" in payload:
-        src.display_order = int(payload["display_order"])
+    if "display_order" in data and data["display_order"] is not None:
+        src.display_order = int(data["display_order"])
 
     db.commit()
     return {
@@ -62,9 +65,9 @@ def update_source(source_id: int, payload: dict, db: Session = Depends(get_db)):
 
 
 @router.post("/sources/reorder")
-def reorder_sources(payload: dict, db: Session = Depends(get_db)):
+def reorder_sources(payload: SourcesReorder, db: Session = Depends(get_db)):
     """Bulk update display_order. payload: {ordered_ids: [1, 3, 2, ...]}"""
-    ordered_ids: List[int] = payload.get("ordered_ids", [])
+    ordered_ids: List[int] = payload.ordered_ids
     for i, sid in enumerate(ordered_ids):
         src = db.query(ImportSource).filter(ImportSource.id == sid).first()
         if src:
@@ -80,10 +83,10 @@ def get_app_settings(db: Session = Depends(get_db)):
 
 
 @router.put("/app/{key}")
-def update_app_setting(key: str, payload: dict, db: Session = Depends(get_db)):
+def update_app_setting(key: str, payload: AppSettingUpdate, db: Session = Depends(get_db)):
     if key not in _ALLOWED_SETTING_KEYS:
         raise HTTPException(status_code=400, detail=f"Chave não permitida: {key}")
-    value = str(payload.get("value", ""))
+    value = str(payload.value)
     row = db.query(AppSettings).filter(AppSettings.key == key).first()
     if row:
         row.value = value

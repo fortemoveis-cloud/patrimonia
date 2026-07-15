@@ -1,6 +1,6 @@
 {
-  "version": "1.1.0",
-  "releaseDate": "2026-06-23",
-  "notes": "Renda de locação mensal por imóvel, histórico e rentabilidade; versão dinâmica no rodapé",
+  "version": "1.2.0",
+  "releaseDate": "2026-07-15",
+  "notes": "Pagamentos e quitação de empréstimos com histórico; atalhos de navegação no dashboard; excluir importação; correções de cálculo (carry-forward, ganhos, cotação) e backup automático antes de migrações",
   "downloadUrl": "https://github.com/fortemoveis-cloud/patrimonia/releases/latest"
 }

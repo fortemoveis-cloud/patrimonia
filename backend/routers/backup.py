@@ -62,7 +62,10 @@ def list_backups():
 
 @router.get("/json")
 def export_json(db: Session = Depends(get_db)):
-    from models import Institution, Asset, Snapshot, ExchangeRate, Loan, LoanSnapshot, Property, PropertyValuation
+    from models import (
+        Institution, Asset, Snapshot, ExchangeRate, Loan, LoanSnapshot, LoanEvent,
+        Property, PropertyValuation, PropertyRentalIncome, ManualAssetHistory, Dividend,
+    )
 
     def rows(model):
         items = db.query(model).all()
@@ -85,8 +88,12 @@ def export_json(db: Session = Depends(get_db)):
         "exchange_rates":  rows(ExchangeRate),
         "loans":           rows(Loan),
         "loan_snapshots":  rows(LoanSnapshot),
+        "loan_events":     rows(LoanEvent),
         "properties":      rows(Property),
         "property_valuations": rows(PropertyValuation),
+        "property_rental_income": rows(PropertyRentalIncome),
+        "manual_asset_history": rows(ManualAssetHistory),
+        "dividends":       rows(Dividend),
     }
 
     buf = BytesIO(json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8"))

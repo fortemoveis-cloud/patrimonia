@@ -45,7 +45,7 @@ class Snapshot(Base):
     __tablename__ = "snapshots"
 
     id = Column(Integer, primary_key=True, index=True)
-    asset_id = Column(Integer, ForeignKey("assets.id"), nullable=False)
+    asset_id = Column(Integer, ForeignKey("assets.id"), nullable=False, index=True)
     snapshot_date = Column(Date, nullable=False, index=True)
     units = Column(Float)
     price = Column(Float)
@@ -95,13 +95,16 @@ class Loan(Base):
     institution = relationship("Institution", back_populates="loans")
     snapshots   = relationship("LoanSnapshot", back_populates="loan",
                                order_by="LoanSnapshot.snapshot_date.desc()")
+    events      = relationship("LoanEvent", back_populates="loan",
+                               order_by="LoanEvent.event_date.desc()",
+                               cascade="all, delete-orphan")
 
 
 class LoanSnapshot(Base):
     __tablename__ = "loan_snapshots"
 
     id                  = Column(Integer, primary_key=True, index=True)
-    loan_id             = Column(Integer, ForeignKey("loans.id"), nullable=False)
+    loan_id             = Column(Integer, ForeignKey("loans.id"), nullable=False, index=True)
     snapshot_date       = Column(Date, nullable=False)
     outstanding_balance = Column(Float)
     interest_accrued    = Column(Float)
@@ -110,6 +113,25 @@ class LoanSnapshot(Base):
     created_at          = Column(DateTime, server_default=func.now())
 
     loan = relationship("Loan", back_populates="snapshots")
+
+
+class LoanEvent(Base):
+    """Evento no histórico de um empréstimo. O saldo devedor é sempre
+    derivado da sequência de eventos (ordem: event_date, id) — nunca editado
+    por cima. Tipos: balance_set (define saldo), payment (abate, piso 0),
+    payoff (quita/zera)."""
+    __tablename__ = "loan_events"
+
+    id                = Column(Integer, primary_key=True, index=True)
+    loan_id           = Column(Integer, ForeignKey("loans.id"), nullable=False, index=True)
+    event_date        = Column(Date, nullable=False)
+    event_type        = Column(String, nullable=False)  # balance_set | payment | payoff
+    amount            = Column(Float)                   # payment/balance_set: valor; payoff: None
+    resulting_balance = Column(Float, nullable=False)   # materializado pelo recálculo
+    notes             = Column(String)
+    created_at        = Column(DateTime, server_default=func.now())
+
+    loan = relationship("Loan", back_populates="events")
 
 
 class Property(Base):

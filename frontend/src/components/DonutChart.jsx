@@ -25,11 +25,12 @@ const CustomTooltip = ({ active, payload }) => {
   );
 };
 
-export default function DonutChart({ data, nameKey = "name", valueKey = "value", title, colors }) {
+export default function DonutChart({ data, nameKey = "name", valueKey = "value", title, colors, onSliceClick, sliceActionLabel = "Ver na Carteira →" }) {
   const COLORS = colors || DEFAULT_COLORS;
   const [selectedIdx, setSelectedIdx] = useState(null);
 
   const mapped = data.map((d) => ({
+    ...d,
     name: d[nameKey],
     value: d[valueKey],
     value_brl: d.value_brl ?? null,
@@ -106,6 +107,14 @@ export default function DonutChart({ data, nameKey = "name", valueKey = "value",
             <p className="text-xs text-gray-400 mt-2 text-right">
               {((sel.value / total) * 100).toFixed(1)}% do total
             </p>
+          )}
+          {onSliceClick && (
+            <button
+              onClick={() => onSliceClick(sel)}
+              className="mt-2 text-xs font-medium text-blue-600 hover:text-blue-700 transition-colors"
+            >
+              {sliceActionLabel}
+            </button>
           )}
         </div>
       )}
